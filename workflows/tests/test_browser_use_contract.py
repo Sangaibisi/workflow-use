@@ -143,6 +143,9 @@ FORBIDDEN_PATTERNS: list[tuple[str, str]] = [
 	(r'\.is_visible\(\)', 'ElementHandle.is_visible does not exist on CDP Element'),
 	(r'\.text_content\(\)', 'ElementHandle.text_content does not exist on CDP Element'),
 	(r'\.inner_text\(\)', 'ElementHandle.inner_text does not exist on CDP Element'),
+	(r'\.input_value\(\)', 'ElementHandle.input_value does not exist on CDP Element'),
+	(r'\bpage\.query_selector\(', 'Page.query_selector does not exist (use get_elements_by_css_selector)'),
+	(r':has-text\(', 'Playwright-only :has-text() pseudo-class is invalid CSS on the CDP surface'),
 	(r'screenshot\(\s*path=', 'Page.screenshot returns base64; it takes no path= kwarg'),
 ]
 

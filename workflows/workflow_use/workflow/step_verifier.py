@@ -10,6 +10,9 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from workflow_use.compat import cdp
+from workflow_use.workflow.url_utils import urls_equivalent
+
 logger = logging.getLogger(__name__)
 
 
@@ -226,18 +229,10 @@ class StepVerifier:
 					parameters={'pre_state': pre_state},
 				)
 			)
-			# Add AI verification for complex outcomes
-			if self.llm:
-				description = getattr(step, 'description', '')
-				checks.append(
-					VerificationCheck(
-						name='click_outcome_check',
-						method=VerificationMethod.AI_ASSISTED,
-						check_function='check_click_outcome',
-						description=f'Verify click achieved expected outcome: {description}',
-						expected_outcome=description,
-					)
-				)
+			# NOTE: no automatic AI check per click - with verification on by
+			# default that would add an LLM round-trip (cost + latency) to every
+			# click. AI verification remains available via explicitly-defined
+			# checks on the step.
 
 		# Input step verification
 		elif step_type == 'input':
@@ -322,13 +317,13 @@ class StepVerifier:
 		if check_fn == 'check_url_matches':
 			expected_url = check.expected_outcome
 			page = await browser_session.get_current_page()
-			current_url = page.url if page else None
+			current_url = await page.get_url() if page else None
 
 			if not current_url:
 				return False, 'Could not get current URL'
 
-			# Allow partial match for URL parameters
-			if expected_url in current_url or current_url.startswith(expected_url):
+			# Redirect-tolerant comparison (http->https, www., locale/query additions)
+			if urls_equivalent(current_url, expected_url):
 				return True, f'URL matches: {current_url}'
 			else:
 				return False, f'URL mismatch: expected {expected_url}, got {current_url}'
@@ -340,8 +335,8 @@ class StepVerifier:
 				return False, 'No page available'
 
 			try:
-				# Check if page is in a loading state
-				ready_state = await page.evaluate('document.readyState')
+				# Check if page is in a loading state (evaluate requires arrow form)
+				ready_state = await cdp.evaluate(page, '() => document.readyState')
 				if ready_state == 'complete':
 					return True, 'Page fully loaded'
 				else:
@@ -396,46 +391,33 @@ class StepVerifier:
 				return False, 'No page available'
 
 			try:
-				# Use Playwright to directly query input elements instead of relying on browser_session.get_state()
-				# This is more resilient and doesn't depend on browser-use's state management
+				# One page round-trip: find the input by placeholder/aria-label/name
+				# or its associated <label> text and read its value. (query_selector/
+				# input_value/:has-text don't exist on the CDP surface.)
+				found_value = await cdp.evaluate(
+					page,
+					"""(needle) => {
+						const wanted = needle.toLowerCase();
+						const matches = (s) => (s || '').toLowerCase().includes(wanted);
+						for (const input of document.querySelectorAll('input, textarea')) {
+							if (matches(input.placeholder) || matches(input.getAttribute('aria-label')) || matches(input.name)) {
+								return input.value ?? '';
+							}
+						}
+						for (const label of document.querySelectorAll('label')) {
+							if (matches(label.textContent)) {
+								const forId = label.getAttribute('for');
+								const control = forId ? document.getElementById(forId) : label.querySelector('input, textarea');
+								if (control) return control.value ?? '';
+							}
+						}
+						return null;
+					}""",
+					target_text or '',
+				)
 
-				# Try multiple strategies to find the input element
-				input_selectors = [
-					f'input[placeholder*="{target_text}" i]',  # By placeholder
-					f'input[aria-label*="{target_text}" i]',  # By aria-label
-					f'input[name*="{target_text}" i]',  # By name attribute
-				]
-
-				# Also try to find by associated label
-				label_selector = f'label:has-text("{target_text}")'
-
-				found_value = None
-
-				# Try each selector
-				for selector in input_selectors:
-					try:
-						element = await page.query_selector(selector)
-						if element:
-							found_value = await element.input_value()
-							if found_value and expected_value in str(found_value):
-								return True, f'Input value set to: {found_value}'
-					except Exception:
-						continue
-
-				# Try finding via label
-				try:
-					label_element = await page.query_selector(label_selector)
-					if label_element:
-						# Get the associated input
-						input_id = await label_element.get_attribute('for')
-						if input_id:
-							input_element = await page.query_selector(f'#{input_id}')
-							if input_element:
-								found_value = await input_element.input_value()
-								if found_value and expected_value in str(found_value):
-									return True, f'Input value set to: {found_value}'
-				except Exception:
-					pass
+				if found_value is not None and expected_value in str(found_value):
+					return True, f'Input value set to: {found_value}'
 
 				# If we found a value but it doesn't match, report that
 				if found_value:
@@ -479,16 +461,20 @@ class StepVerifier:
 				return False, 'No page available'
 
 			try:
-				# Check selected option in select elements
-				selected_options = await page.evaluate(
+				# Check selected option in select elements (evaluate returns a JSON
+				# string; decode it into a real list)
+				selected_options = await cdp.evaluate(
+					page,
 					"""() => {
 						const selects = document.querySelectorAll('select');
 						return Array.from(selects).map(select => {
 							const selected = select.options[select.selectedIndex];
 							return selected ? selected.text : null;
 						}).filter(Boolean);
-					}"""
+					}""",
 				)
+				if not isinstance(selected_options, list):
+					selected_options = []
 
 				if expected_option in selected_options:
 					return True, f'Option "{expected_option}" is selected'
@@ -505,7 +491,7 @@ class StepVerifier:
 				return False, 'No page available'
 
 			try:
-				current_scroll = await page.evaluate('({x: window.scrollX, y: window.scrollY})')
+				current_scroll = await cdp.evaluate(page, '() => ({x: window.scrollX, y: window.scrollY})')
 				pre_scroll = check.parameters.get('pre_state', {}).get('scroll_position', {})
 
 				if current_scroll != pre_scroll:
@@ -582,7 +568,8 @@ Respond with ONLY one of:
 
 			messages = [UserMessage(content=prompt_text)]
 			result = await self.llm.ainvoke(messages)
-			response_text = result.content.strip().upper()
+			# ChatInvokeCompletion exposes .completion (there is no .content)
+			response_text = result.completion.strip().upper()
 
 			if response_text.startswith('PASS'):
 				reason = response_text.replace('PASS:', '').strip()
@@ -636,16 +623,16 @@ Respond with ONLY one of:
 		"""
 		try:
 			state = {
-				'url': page.url,
-				'title': await page.title(),
-				'visible_text': await page.evaluate('document.body?.innerText || ""'),
-				'visible_elements_count': await page.evaluate('document.querySelectorAll("*").length'),
-				'scroll_position': await page.evaluate('({x: window.scrollX, y: window.scrollY})'),
+				'url': await page.get_url(),
+				'title': await page.get_title(),
+				'visible_text': await cdp.evaluate(page, '() => document.body?.innerText || ""'),
+				'visible_elements_count': await cdp.evaluate(page, '() => document.querySelectorAll("*").length'),
+				'scroll_position': await cdp.evaluate(page, '() => ({x: window.scrollX, y: window.scrollY})'),
 			}
 
 			# Calculate simple DOM hash
 			try:
-				dom_structure = await page.evaluate('document.documentElement?.outerHTML?.substring(0, 1000) || ""')
+				dom_structure = await cdp.evaluate(page, '() => document.documentElement?.outerHTML?.substring(0, 1000) || ""')
 				state['dom_hash'] = hash(dom_structure)
 			except Exception:
 				state['dom_hash'] = 0

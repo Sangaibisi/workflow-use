@@ -63,6 +63,7 @@ def make_executor(signatures):
 	value once exhausted), letting tests simulate 'page changed' vs 'no effect'.
 	"""
 	executor = SemanticWorkflowExecutor(browser=Mock())
+	executor.step_verifier = None  # exercise the legacy verifier path these tests stub
 	executor._refresh_semantic_mapping = AsyncMock()
 	executor._detect_form_validation_errors = AsyncMock(return_value={})
 

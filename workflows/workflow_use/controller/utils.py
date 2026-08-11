@@ -14,8 +14,8 @@ def truncate_selector(selector: str, max_length: int = 35) -> str:
 async def _find_by_tag_and_text(page, tag: str, text: str, timeout_ms: float):
 	"""Text-based fallback: match a *tag* element whose visible text contains *text*.
 
-	(Replaces the Playwright-only ``:has-text()`` pseudo-class, which is not
-	valid CSS and throws in ``document.querySelectorAll``.)
+	(Replaces the Playwright-only text pseudo-class, which is not valid CSS
+	and throws in ``document.querySelectorAll``.)
 	"""
 	wanted = ' '.join(text.split()).lower()
 	if not wanted:

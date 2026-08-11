@@ -41,7 +41,10 @@ class SemanticWorkflowExecutor:
 		max_global_failures: int = 5,
 		max_verification_failures: int = 3,
 		page_extraction_llm: BaseChatModel | None = None,
-		enable_step_verification: bool = False,  # Disabled by default until fully stable
+		# Deterministic checks (URL match, page loaded, state delta) are cheap and
+		# now run on the real CDP API; steps without defined checks fall back to
+		# the legacy per-step verifiers via the SKIPPED path.
+		enable_step_verification: bool = True,
 	):
 		self.browser = browser
 		self.semantic_extractor = SemanticExtractor()
@@ -1278,8 +1281,8 @@ class SemanticWorkflowExecutor:
 			elif 'radio' in selector.lower() or 'checkbox' in selector.lower():
 				# Try clicking the associated label first (most reliable)
 				if target_text:
+					# (:has-text() is Playwright-only; :has() and [for*=] are real CSS)
 					label_strategies = [
-						f'label:has-text("{target_text}")',
 						f'label[for*="{target_text.lower()}"]',
 						f'label:has(input[value="{target_text.lower()}"])',
 					]
@@ -2612,41 +2615,10 @@ class SemanticWorkflowExecutor:
 
 	@staticmethod
 	def _urls_equivalent(current_url: str, expected_url: str) -> bool:
-		"""Redirect-tolerant URL comparison.
+		"""Redirect-tolerant URL comparison (see workflow_use.workflow.url_utils)."""
+		from workflow_use.workflow.url_utils import urls_equivalent
 
-		Exact equality fails on ordinary server behavior (http->https upgrade,
-		added locale segments or query params, trailing-slash canonicalization,
-		www. differences). Navigating to *expected* and landing on such a variant
-		is a SUCCESSFUL navigation. Cross-host redirects still fail.
-		"""
-		from urllib.parse import urlparse
-
-		def _norm(url: str) -> str:
-			return (url or '').split('#')[0].rstrip('/')
-
-		if _norm(current_url) == _norm(expected_url):
-			return True
-
-		try:
-			cur, exp = urlparse(_norm(current_url)), urlparse(_norm(expected_url))
-		except ValueError:
-			return False
-
-		def _host(parsed) -> str:
-			host = (parsed.netloc or '').lower()
-			return host[4:] if host.startswith('www.') else host
-
-		if not _host(cur) or _host(cur) != _host(exp):
-			return False  # landed on a different site: real failure
-
-		cur_path = cur.path.rstrip('/')
-		exp_path = exp.path.rstrip('/')
-		if cur_path == exp_path:
-			return True  # scheme/query/fragment differences are tolerated
-		if not exp_path:
-			return True  # expected the site root; locale/home redirects are fine
-		# Server deepened the path (e.g. /login -> /login/identifier)
-		return cur_path.startswith(exp_path + '/')
+		return urls_equivalent(current_url, expected_url)
 
 	async def _verify_navigation_action(self, expected_url: str) -> bool:
 		"""Verify that navigation succeeded by checking current URL (redirect-tolerant)."""
@@ -3017,22 +2989,31 @@ EXTRACTED INFORMATION:"""
 							logger.info(f'Found calendar date: {date_value} in {calendar_type} calendar')
 							return element_info
 
-			# Fallback: Try to find by aria-label or text content
+			# Fallback: find by aria-label/data-date attribute or day-cell text via
+			# one page evaluation (:has-text()/query_selector don't exist on CDP)
 			date_patterns = self._generate_date_patterns(date_value)
 			for pattern in date_patterns:
-				# Look for elements with matching aria-label or text
-				calendar_element = await page.query_selector(
-					f'[role="gridcell"][aria-label*="{pattern}"], '
-					f'[data-date*="{pattern}"], '
-					f'.calendar-day:has-text("{pattern}"), '
-					f'.day:has-text("{pattern}")'
+				found = await cdp.evaluate(
+					page,
+					"""(pattern) => {
+						const byAttr = document.querySelector(
+							`[role="gridcell"][aria-label*="${pattern}"], [data-date*="${pattern}"]`
+						);
+						let el = byAttr;
+						if (!el) {
+							for (const day of document.querySelectorAll('.calendar-day, .day, [role="gridcell"]')) {
+								if ((day.textContent || '').trim().includes(pattern)) { el = day; break; }
+							}
+						}
+						if (!el) return null;
+						return { id: el.id || '', cls: typeof el.className === 'string' ? el.className : '' };
+					}""",
+					pattern,
 				)
 
-				if calendar_element:
-					# Generate dynamic element info
-					element_id = await calendar_element.get_attribute('id')
-					element_class = await calendar_element.get_attribute('class')
-
+				if isinstance(found, dict):
+					element_id = found.get('id') or ''
+					element_class = found.get('cls') or ''
 					selector = (
 						f'#{element_id}'
 						if element_id
@@ -3090,29 +3071,47 @@ EXTRACTED INFORMATION:"""
 						logger.info(f'Found dropdown option: {option_text}')
 						return element_info
 
-			# Fallback: Try to find dropdown options directly
-			option_selectors = [
-				f'[role="option"]:has-text("{option_text}")',
-				f'[role="menuitem"]:has-text("{option_text}")',
-				f'.option:has-text("{option_text}")',
-				f'.menu-item:has-text("{option_text}")',
-				f'[data-value*="{option_text.lower()}"]',
-			]
-
-			for selector in option_selectors:
-				try:
-					option_element = await page.query_selector(selector)
-					if option_element:
-						return {
-							'selectors': selector,
-							'hierarchical_selector': selector,
-							'fallback_selector': f':has-text("{option_text}")',
-							'element_type': 'dropdown',
-							'option_text': option_text,
-							'dropdown_context': dropdown_context,
+			# Fallback: scan candidate option elements by visible text in one page
+			# evaluation (:has-text()/query_selector don't exist on CDP)
+			found = await cdp.evaluate(
+				page,
+				"""(optionText) => {
+					const wanted = optionText.toLowerCase();
+					const candidates = document.querySelectorAll(
+						'[role="option"], [role="menuitem"], .option, .menu-item, [data-value]'
+					);
+					for (const el of candidates) {
+						const text = (el.textContent || '').trim().toLowerCase();
+						const dataValue = (el.getAttribute('data-value') || '').toLowerCase();
+						if ((text && text.includes(wanted)) || (dataValue && dataValue.includes(wanted))) {
+							return { id: el.id || '', cls: typeof el.className === 'string' ? el.className : '', role: el.getAttribute('role') || '' };
 						}
-				except Exception:
-					continue
+					}
+					return null;
+				}""",
+				option_text,
+			)
+
+			if isinstance(found, dict):
+				element_id = found.get('id') or ''
+				element_class = found.get('cls') or ''
+				role = found.get('role') or ''
+				if element_id:
+					selector = f'#{element_id}'
+				elif element_class:
+					selector = f'.{element_class.split()[0]}'
+				elif role:
+					selector = f'[role="{role}"]'
+				else:
+					selector = '[data-value]'
+				return {
+					'selectors': selector,
+					'hierarchical_selector': selector,
+					'fallback_selector': selector,
+					'element_type': 'dropdown',
+					'option_text': option_text,
+					'dropdown_context': dropdown_context,
+				}
 
 			logger.warning(f'Could not find dropdown option: {option_text}')
 			return None
