@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import { apiUrl } from "../lib/api-base";
 import { LogViewerProps } from "../types/log-viewer.types";
 
 const LogViewer: React.FC<LogViewerProps> = ({
@@ -37,7 +38,7 @@ const LogViewer: React.FC<LogViewerProps> = ({
     const pollLogs = async () => {
       try {
         const response = await fetch(
-          `http://127.0.0.1:8000/api/workflows/logs/${taskId}?position=${position}`
+          apiUrl(`/api/workflows/logs/${taskId}?position=${position}`)
         );
 
         if (!response.ok) {
@@ -59,6 +60,16 @@ const LogViewer: React.FC<LogViewerProps> = ({
           if (data.status === "failed" && data.error) {
             setError(data.error);
             onError?.(data.error);
+          }
+        }
+
+        // Stop polling once the run reaches a terminal state - otherwise the
+        // viewer hammered /logs forever after the workflow finished.
+        if (["completed", "failed", "cancelled"].includes(data.status)) {
+          setPolling(false);
+          if (pollingIntervalRef.current) {
+            clearInterval(pollingIntervalRef.current);
+            pollingIntervalRef.current = null;
           }
         }
       } catch (err) {
@@ -88,7 +99,7 @@ const LogViewer: React.FC<LogViewerProps> = ({
 
     try {
       const response = await fetch(
-        `http://127.0.0.1:8000/api/workflows/tasks/${taskId}/cancel`,
+        apiUrl(`/api/workflows/tasks/${taskId}/cancel`),
         {
           method: "POST",
           headers: {

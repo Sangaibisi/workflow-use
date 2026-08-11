@@ -7,7 +7,17 @@ export function jsonToFlow(workflow: string): {
   edges: Edge[];
   metadata: WorkflowMetadata;
 } {
-  const parsedWorkflow = JSON.parse(workflow) as Workflow;
+  let parsedWorkflow: Workflow;
+  try {
+    parsedWorkflow = JSON.parse(workflow) as Workflow;
+  } catch (e) {
+    throw new Error(
+      `Workflow file is not valid JSON: ${e instanceof Error ? e.message : String(e)}`
+    );
+  }
+  if (!parsedWorkflow || !Array.isArray(parsedWorkflow.steps)) {
+    throw new Error("Workflow file has no 'steps' array");
+  }
   const nodes: Node<NodeData>[] = parsedWorkflow.steps.map((step: StepData, idx: number) => ({
     id: String(idx),
     data: {

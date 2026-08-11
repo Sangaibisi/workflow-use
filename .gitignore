@@ -16,6 +16,10 @@ eggs/
 .eggs/
 lib/
 lib64/
+# `lib/` above is for Python build artifacts, but it also swallows UI sources:
+# new files under ui/src/lib/ were silently unignorable (api/index.ts is only
+# tracked because it was committed before). Re-include the UI source dir.
+!ui/src/lib/
 parts/
 sdist/
 var/

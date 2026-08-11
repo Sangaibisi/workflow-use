@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { apiUrl } from "../lib/api-base";
 import LogViewer from "./log-viewer";
 import { PlayButtonProps, InputField } from "../types/play-button.types";
 
@@ -22,12 +23,17 @@ export const PlayButton: React.FC<PlayButtonProps> = ({
     setError(null);
 
     if (workflowMetadata && workflowMetadata.input_schema) {
-      const fields = workflowMetadata.input_schema.map((input: { name: string; type: string; required: boolean }) => ({
-        name: input.name,
-        type: input.type,
-        required: input.required,
-        value: input.type === "boolean" ? false : "",
-      }));
+      const fields = workflowMetadata.input_schema.map((input: { name: string; type: string; required: boolean }) => {
+        // Backend schema emits the literal 'bool' (and 'number'); normalize so
+        // the checkbox actually renders (the UI used to only match 'boolean').
+        const t = input.type === "bool" ? "boolean" : input.type;
+        return {
+          name: input.name,
+          type: t,
+          required: input.required,
+          value: t === "boolean" ? false : "",
+        };
+      });
       setInputFields(fields);
     } else {
       setInputFields([]);
@@ -92,7 +98,7 @@ export const PlayButton: React.FC<PlayButtonProps> = ({
       });
 
       const response = await fetch(
-        "http://127.0.0.1:8000/api/workflows/execute",
+        apiUrl("/api/workflows/execute"),
         {
           method: "POST",
           headers: {

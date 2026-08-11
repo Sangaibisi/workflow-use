@@ -5,6 +5,7 @@ import React, {
   MouseEvent,
   useEffect,
 } from "react";
+import { apiUrl } from "../lib/api-base";
 import {
   ReactFlow,
   Background,
@@ -186,7 +187,7 @@ const WorkflowLayout: React.FC = () => {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch("http://localhost:8000/api/workflows/metadata");
+        const res = await fetch(apiUrl("/api/workflows/metadata"));
         const data = (await res.json()) as {
           workflows: Array<{ file: string } & WorkflowMetadata>;
         };
@@ -202,7 +203,10 @@ const WorkflowLayout: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [workflows]);
+    // Keyed on count, not the array reference: one batched /metadata request
+    // per list-size change (was a per-file storm before the batch endpoint).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workflows.length]);
 
   const isLoading = isLoadingWorkflows || isLoadingSelectedWorkflow;
 
@@ -219,7 +223,8 @@ const WorkflowLayout: React.FC = () => {
     );
   }
 
-  if (!workflows.length) return <NoWorkflowsMessage />;
+  if (!workflows.length)
+    return <NoWorkflowsMessage onRecordingSaved={handleRecordingSaved} />;
 
   return (
     <div className="flex h-screen font-sans">
@@ -266,10 +271,11 @@ const WorkflowLayout: React.FC = () => {
               <button
                 title="Refresh workflow"
                 className="flex h-9 w-9 items-center justify-center rounded-full bg-[#2a2a2a] text-white shadow transition-transform duration-200 ease-in-out hover:scale-105 hover:bg-blue-500"
-                onClick={async () => {
-                  if (selected && workflowMetadata) {
-                    await updateWorkflowMetadata(selected, workflowMetadata);
-                  }
+                onClick={() => {
+                  // Actually REFETCH from disk. This used to write the stale
+                  // in-memory metadata back to the file - a refresh button that
+                  // could clobber edits made outside the GUI.
+                  queryClient.invalidateQueries();
                 }}
                 disabled={isUpdating}
               >

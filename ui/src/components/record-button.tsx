@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { API_BASE_URL } from "../lib/api-base";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = API_BASE_URL;
 
 type RecordingStatus = {
   status: "idle" | "recording" | "saving" | "done" | "error" | "no_data";

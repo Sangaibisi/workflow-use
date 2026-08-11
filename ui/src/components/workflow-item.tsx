@@ -99,7 +99,8 @@ const WorkflowItem: React.FC<WorkflowItemProps> = ({
         <div className="text-xs">{metadata.description}</div>
       </div>
 
-      {metadata.input_schema?.length && (
+      {/* boolean coercion: `length && ...` renders a literal '0' for [] */}
+      {(metadata.input_schema?.length ?? 0) > 0 && (
         <>
           <div className="text-xs text-[#aaa] mb-1">Input Parameters</div>
           <ul className="pl-4 text-xs list-disc marker:text-[#7ac5ff]">
