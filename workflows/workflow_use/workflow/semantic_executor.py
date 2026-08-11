@@ -476,6 +476,46 @@ class SemanticWorkflowExecutor:
 		logger.warning(f"❌ No elements found matching pattern '{pattern}' at any priority level")
 		return None
 
+	# Ordinal words + patterns the schema documents for position_hint
+	_ORDINAL_WORDS = {
+		'first': 1,
+		'second': 2,
+		'third': 3,
+		'fourth': 4,
+		'fifth': 5,
+		'sixth': 6,
+		'seventh': 7,
+		'eighth': 8,
+		'ninth': 9,
+		'tenth': 10,
+	}
+
+	@classmethod
+	def _parse_position_hint(cls, position_hint: Optional[str]) -> Optional[int]:
+		"""Parse a position hint into a 1-based index (None = no/unparseable hint).
+
+		Supported: 'first'/'second'/.../'last' (-1), pure digits ('2'),
+		ordinal suffixes ('2nd', '3rd'), and 'item 2 of 3' phrasing - the
+		schema documents these, but only first/last/digits used to parse,
+		so 'item 2 of 3' silently fell back to the FIRST match.
+		"""
+		if not position_hint:
+			return None
+		hint = position_hint.strip().lower()
+		if hint == 'last':
+			return -1
+		if hint in cls._ORDINAL_WORDS:
+			return cls._ORDINAL_WORDS[hint]
+		if hint.isdigit():
+			return int(hint)
+		match = re.search(r'(?:item\s+)?(\d+)(?:\s*(?:of|/)\s*\d+)?', hint)
+		if match:
+			return int(match.group(1))
+		match = re.match(r'(\d+)(?:st|nd|rd|th)$', hint)
+		if match:
+			return int(match.group(1))
+		return None
+
 	def _select_element_by_position(
 		self, matching_elements: list, position_hint: Optional[str], container_hint: Optional[str]
 	) -> Optional[Dict]:
@@ -489,35 +529,25 @@ class SemanticWorkflowExecutor:
 		# Sort by priority (lower number = higher priority)
 		matching_elements.sort(key=lambda x: x[2])
 
-		# Apply position hint
-		if position_hint == 'first' and matching_elements:
-			selected_text, selected_element, priority = matching_elements[0]
-			logger.info(f'Selected first matching element (Priority {priority}): {selected_text}')
-			return selected_element
-		elif position_hint == 'last' and matching_elements:
-			# Get all elements with the best priority
+		index = self._parse_position_hint(position_hint)
+		if index is not None:
+			# Positions apply within the best-priority group
 			best_priority = matching_elements[0][2]
 			best_matches = [e for e in matching_elements if e[2] == best_priority]
-			selected_text, selected_element, priority = best_matches[-1]
-			logger.info(f'Selected last matching element (Priority {priority}): {selected_text}')
-			return selected_element
-		elif position_hint and position_hint.isdigit():
-			index = int(position_hint) - 1  # Convert to 0-indexed
-			# Get all elements with the best priority
-			best_priority = matching_elements[0][2]
-			best_matches = [e for e in matching_elements if e[2] == best_priority]
-			if 0 <= index < len(best_matches):
-				selected_text, selected_element, priority = best_matches[index]
-				logger.info(f'Selected element at position {position_hint} (Priority {priority}): {selected_text}')
+			if index == -1:
+				selected_text, selected_element, priority = best_matches[-1]
+				logger.info(f'Selected last matching element (Priority {priority}): {selected_text}')
 				return selected_element
+			if 1 <= index <= len(best_matches):
+				selected_text, selected_element, priority = best_matches[index - 1]
+				logger.info(f"Selected element at position '{position_hint}' (Priority {priority}): {selected_text}")
+				return selected_element
+			logger.warning(f"Position hint '{position_hint}' out of range ({len(best_matches)} matches); using first")
 
 		# No position hint or invalid position - return first match (highest priority)
-		if matching_elements:
-			selected_text, selected_element, priority = matching_elements[0]
-			logger.info(f'No valid position hint, returning first match (Priority {priority}): {selected_text}')
-			return selected_element
-
-		return None
+		selected_text, selected_element, priority = matching_elements[0]
+		logger.info(f'No valid position hint, returning first match (Priority {priority}): {selected_text}')
+		return selected_element
 
 	async def _try_direct_selector(self, target_text: str) -> Optional[str]:
 		"""Try to use target_text as a direct selector (ID or name) with improved robustness."""
@@ -899,9 +929,16 @@ class SemanticWorkflowExecutor:
 		# Use the selector that actually worked
 		selector_to_use = actual_selector
 
+		# When position/container hints disambiguated a SPECIFIC element, the click
+		# must honor that resolved selector - the text-direct strategy would click
+		# the first text match on the page and discard the disambiguation.
+		hints_used = bool(getattr(step, 'position_hint', None) or getattr(step, 'container_hint', None))
+
 		# Execute click with verification and retry
 		async def click_executor():
-			success = await self._click_element_intelligently(selector_to_use, target_identifier, element_info)
+			success = await self._click_element_intelligently(
+				selector_to_use, target_identifier, element_info, prefer_selector=hints_used
+			)
 			if not success:
 				raise Exception(f'Failed to click element: {target_identifier or step.description or selector_to_use}')
 
@@ -1021,14 +1058,21 @@ class SemanticWorkflowExecutor:
 			logger.error(f'Traceback: {traceback.format_exc()}')
 			return False
 
-	async def _click_element_intelligently(self, selector: str, target_text: str, element_info: Dict | None = None) -> bool:
-		"""Click element using the most appropriate strategy based on element type."""
+	async def _click_element_intelligently(
+		self, selector: str, target_text: str, element_info: Dict | None = None, prefer_selector: bool = False
+	) -> bool:
+		"""Click element using the most appropriate strategy based on element type.
+
+		With *prefer_selector* (position/container hints resolved a specific
+		element), the text-direct shortcut is skipped so the disambiguated
+		selector actually drives the click.
+		"""
 		page = await self.browser.get_current_page()
 
 		# STRATEGY 0: Try direct text-based clicking first (most semantic)
 		# BUT: Only fail if we don't have a selector to fall back to
 		# target_text might be just a descriptive label, not actual visible text
-		if target_text and target_text.strip():
+		if not prefer_selector and target_text and target_text.strip():
 			element_tag = element_info.get('tag', '').lower() if element_info else None
 			if await self._click_element_by_text_direct(target_text, element_tag):
 				return True
