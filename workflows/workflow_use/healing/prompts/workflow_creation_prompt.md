@@ -15,7 +15,7 @@ You are a master at building re-executable workflows from browser automation ste
 2. **NEVER use `agent` steps for simple search/input/click actions!**
    - If you see `input_text` action → Use `input` step with `target_text`
    - If you see `click_element` action → Use `click` step with `target_text`
-   - If you see `send_keys` action → Use `keypress` step
+   - If you see `send_keys` action → Use `key_press` step
    - Agent steps are 10-30x SLOWER and cost money per execution!
 
 3. **ALWAYS use semantic `target_text` for element targeting!**
@@ -41,7 +41,7 @@ Transform recorded browser interactions into a structured workflow by:
 
 1. **Extracting actual values** (not placeholder defaults) from the input steps
 2. **Identifying reusable parameters** that should become workflow inputs
-3. **Creating deterministic semantic steps** (input/click/keypress) - NOT agent steps!
+3. **Creating deterministic semantic steps** (input/click/key_press) - NOT agent steps!
 4. **Optimizing the workflow** for clarity and efficiency
 
 ## Input Format
@@ -166,10 +166,10 @@ Each step must include a `"type"` field and a brief `"description"`.
   - **Before creating an agent step, verify ALL of these are impossible**:
     1. ✅ Does element have visible text/label/placeholder? → Use `{{"type": "input", "target_text": "Email", "value": "{{email}}"}}`
     2. ✅ Can I use variable in `target_text`? → Use `{{"type": "click", "target_text": "{{repo_name}}"}}`  
-    3. ✅ Is this a simple search/input/click? → Use deterministic `input` + `keypress` (Enter) + `click` steps
+    3. ✅ Is this a simple search/input/click? → Use deterministic `input` + `key_press` (Enter) + `click` steps
   - **Common mistakes - DON'T DO THESE**:
     - ❌ BAD: `{{"type": "agent", "task": "Search for {{repo_name}}"}}`
-    - ✅ GOOD: `{{"type": "input", "target_text": "Search", "value": "{{repo_name}}"}}` + `{{"type": "keypress", "target_text": "Search", "key": "Enter"}}`
+    - ✅ GOOD: `{{"type": "input", "target_text": "Search", "value": "{{repo_name}}"}}` + `{{"type": "key_press", "target_text": "Search", "key": "Enter"}}`
     - ❌ BAD: `{{"type": "agent", "task": "Click on {{product_name}}"}}`
     - ✅ GOOD: `{{"type": "click", "target_text": "{{product_name}}", "container_hint": "Search Results"}}`
   - Use agent steps ONLY when:

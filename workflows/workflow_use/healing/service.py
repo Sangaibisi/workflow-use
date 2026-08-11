@@ -192,8 +192,19 @@ class HealingService:
 			if history.model_output is None:
 				continue
 
+			# model_output.action[i] acted on state.interacted_element[i]. The
+			# index an action targeted lives in its params ('index'), NOT on the
+			# DOM node: browser-use 0.13 nodes have no highlight_index, so the
+			# old getattr(..., 'highlight_index', 0) reported 0 for everything
+			# and broke the action<->element correlation the LLM prompt uses.
+			action_indexes: list[int | None] = []
+			for action in history.model_output.action:
+				dump = action.model_dump(exclude_unset=True)
+				params = next(iter(dump.values()), None) if dump else None
+				action_indexes.append(params.get('index') if isinstance(params, dict) else None)
+
 			interacted_elements: list[SimpleDomElement] = []
-			for element in history.state.interacted_element:
+			for pos, element in enumerate(history.state.interacted_element):
 				if element is None:
 					continue
 
@@ -206,10 +217,11 @@ class HealingService:
 				if element_hash not in self.interacted_elements_hash_map:
 					self.interacted_elements_hash_map[element_hash] = element
 
+				action_index = action_indexes[pos] if pos < len(action_indexes) else None
 				interacted_elements.append(
 					SimpleDomElement(
 						tag_name=tag_name,
-						highlight_index=getattr(element, 'highlight_index', 0),
+						highlight_index=action_index if action_index is not None else 0,
 						shadow_root=getattr(element, 'shadow_root', False),
 						element_hash=element_hash,
 					)
@@ -368,7 +380,7 @@ class HealingService:
 		for history in history_list.history:
 			if history.model_output is None:
 				continue
-			for action in history.model_output.action:
+			for action_pos, action in enumerate(history.model_output.action):
 				action_dict = action.model_dump()
 				# Extract index from browser-use action format
 				for key, value in action_dict.items():
@@ -397,12 +409,14 @@ class HealingService:
 								print(f'      XPath: {mock_element.x_path}')
 								continue
 
-							# Fallback: Use history.state.interacted_element
-							for element in history.state.interacted_element:
-								if element and hasattr(element, 'highlight_index') and element.highlight_index == index:
-									self.interacted_elements_hash_map[element_hash] = element
-									print(f'   📍 Populated selector for hash {element_hash} from history (index {index})')
-									break
+							# Fallback: use the position-aligned history element.
+							# model_output.action[i] acted on interacted_element[i];
+							# 0.13 nodes carry no highlight_index to match on, so
+							# the old attribute-matching loop never found anything.
+							elements = history.state.interacted_element
+							if action_pos < len(elements) and elements[action_pos] is not None:
+								self.interacted_elements_hash_map[element_hash] = elements[action_pos]
+								print(f'   📍 Populated selector for hash {element_hash} from history (position {action_pos}, index {index})')
 
 		# Create workflow definition dict
 		workflow_dict = self.deterministic_converter.create_workflow_definition(
@@ -729,10 +743,14 @@ class HealingService:
 								action_type = 'scroll'
 								break
 
-						# Get current URL
+						# Get current URL. Browser has no get_current_url() on the
+						# CDP surface - the old call raised AttributeError into the
+						# except below, so every captured step lost its URL.
 						current_url = ''
 						try:
-							current_url = await browser_session.get_current_url()
+							page = await browser_session.get_current_page()
+							if page:
+								current_url = await page.get_url()
 						except Exception:
 							pass
 

@@ -28,10 +28,12 @@ def escape_xpath_string(value: str) -> str:
 	Examples:
 	    >>> escape_xpath_string('hello')
 	    "'hello'"
-	    >>> escape_xpath_string("it's")
-	    'concat("it", "\'", "s")'
-	    >>> escape_xpath_string('say "hello"')
+	    >>> escape_xpath_string("it's")  # single quotes -> double-quoted
+	    '"it\'s"'
+	    >>> escape_xpath_string('say "hello"')  # double quotes -> single-quoted
 	    '\'say "hello"\''
+	    >>> escape_xpath_string('a\'b"c')  # both -> concat(...)
+	    'concat("a", "\'", \'b"c\')'
 	"""
 	if not value:
 		return "''"
@@ -120,9 +122,10 @@ class XPathOptimizer:
 		anchored_xpaths = self._generate_anchored_xpaths(parts, element_info)
 		alternatives.extend(anchored_xpaths)
 
-		# Strategy 3: Use position within stable containers
-		positional_xpaths = self._generate_positional_xpaths(parts, element_info)
-		alternatives.extend(positional_xpaths)
+		# (A former Strategy 3 emitted a hardcoded '(//table//tag)[1]' - the
+		# FIRST occurrence regardless of which one was recorded, i.e. a
+		# wrong-element selector for anything but the first. Dropped: a missing
+		# alternative is recoverable, clicking the wrong element is not.)
 
 		# Strategy 4: Shortened absolute path (remove volatile parents)
 		shortened_xpath = self._shorten_absolute_xpath(parts)
@@ -184,6 +187,12 @@ class XPathOptimizer:
 				tag = match.group(1)
 				index = int(match.group(2)) if match.group(2) else None
 				parts.append({'tag': tag, 'index': index, 'original': segment})
+			else:
+				# A segment we can't parse (wildcard, predicate, namespace...).
+				# Silently skipping it used to make every derived path SKIP A
+				# LEVEL - producing selectors for a different element. Refuse
+				# to optimize instead; the absolute fallback still works.
+				return []
 
 		return parts
 
@@ -308,29 +317,6 @@ class XPathOptimizer:
 
 		return xpaths
 
-	def _generate_positional_xpaths(self, parts: List[Dict], element_info: Optional[Dict]) -> List[str]:
-		"""
-		Generate XPaths using position within containers.
-
-		Examples:
-		- (//table//a)[2] - Second link in any table
-		- //form//button[last()] - Last button in form
-		"""
-		xpaths = []
-
-		if not parts:
-			return xpaths
-
-		target_tag = parts[-1]['tag']
-
-		# Find if target is in a table
-		has_table = any(p['tag'] == 'table' for p in parts)
-		if has_table and element_info:
-			# Position within table
-			xpaths.append(f'(//table//{target_tag})[1]')  # First occurrence
-
-		return xpaths
-
 	def _build_relative_path(self, parts: List[Dict]) -> str:
 		"""
 		Build relative path from parsed parts.
@@ -369,21 +355,29 @@ class XPathOptimizer:
 		if len(parts) <= 4:
 			return None  # Already short enough
 
-		# Find last stable anchor
-		stable_tags = {'html', 'body', 'table', 'form', 'nav', 'header', 'footer', 'main'}
-		last_stable_idx = 0
+		# Find last stable anchor. html/body are excluded: anchoring there just
+		# reproduces the absolute path.
+		stable_tags = {'table', 'form', 'nav', 'header', 'footer', 'main'}
+		last_stable_idx = None
 
 		for i, part in enumerate(parts):
 			if part['tag'] in stable_tags:
 				last_stable_idx = i
 
-		# Keep last stable anchor + last 3 elements
-		if last_stable_idx < len(parts) - 3:
-			keep_from = max(last_stable_idx, len(parts) - 3)
-			shortened_parts = parts[keep_from:]
+		if last_stable_idx is None or last_stable_idx >= len(parts) - 1:
+			return None
 
-			# Build shortened path
-			path = '/' + '/'.join(p['original'] for p in shortened_parts)
-			return path
+		shortened_parts = parts[last_stable_idx:]
+		if len(shortened_parts) >= len(parts):
+			return None  # Nothing actually removed
 
-		return None
+		# Descendant-anchor at the stable tag. The old code emitted
+		# '/' + 'div[1]/input[2]' - an ABSOLUTE path whose root element would
+		# have to be a div, which matches nothing, ever. The anchor's original
+		# sibling index is also meaningless once its parent chain is gone;
+		# '(//form)[2]' (2nd form in the document) is the closest faithful
+		# reading, while deeper segments keep their sibling indices verbatim.
+		anchor = shortened_parts[0]
+		head = f'(//{anchor["tag"]})[{anchor["index"]}]' if anchor['index'] else f'//{anchor["tag"]}'
+		tail = '/'.join(p['original'] for p in shortened_parts[1:])
+		return f'{head}/{tail}' if tail else head

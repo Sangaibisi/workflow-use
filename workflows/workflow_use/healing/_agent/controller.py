@@ -1,16 +1,15 @@
 import logging
 
 from browser_use import ActionResult, Controller
-from browser_use.llm import ChatBrowserUse
 from browser_use.llm.base import BaseChatModel
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
-
-page_extraction_llm = ChatBrowserUse(
-	model='bu-latest',
-)
+# NOTE: no module-level ChatBrowserUse here. A module-scope instance made
+# `import workflow_use.healing._agent.controller` raise ValueError whenever
+# BROWSER_USE_API_KEY was unset - and the instance was never even used
+# (callers pass extraction_llm into HealingController explicitly).
 
 
 class ActionModel(BaseModel):

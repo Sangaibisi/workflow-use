@@ -237,6 +237,29 @@ class WorkflowDefinitionSchema(BaseModel):
 		description='List of input schema definitions.',
 	)
 
+	@validator('steps', pre=True)
+	def normalize_llm_step_vocabulary(cls, steps):
+		"""Normalize common LLM/legacy spellings before union validation.
+
+		Generated workflows (and older prompt versions) routinely arrive with
+		'keypress' instead of 'key_press', or with the two extraction step
+		vocabularies crossed ('extract' + goal / 'extract_page_content' +
+		extractionGoal). Without this, the whole file is rejected at load.
+		"""
+		if not isinstance(steps, list):
+			return steps
+		for step in steps:
+			if not isinstance(step, dict):
+				continue
+			step_type = step.get('type')
+			if step_type == 'keypress':
+				step['type'] = 'key_press'
+			elif step_type == 'extract' and 'extractionGoal' not in step and 'goal' in step:
+				step['extractionGoal'] = step.pop('goal')
+			elif step_type == 'extract_page_content' and 'goal' not in step and 'extractionGoal' in step:
+				step['goal'] = step.pop('extractionGoal')
+		return steps
+
 	@validator('steps')
 	def validate_ends_with_extract(cls, steps: List[WorkflowStep]) -> List[WorkflowStep]:
 		"""Recordings arrive step-by-step, so an extract-terminated workflow

@@ -67,7 +67,7 @@ class DeterministicWorkflowConverter:
 				step_duration = history.metadata.duration_seconds
 
 			# Process each action in this history item
-			for action in history.model_output.action:
+			for action_pos, action in enumerate(history.model_output.action):
 				action_dict = action.model_dump()
 
 				# Browser-use action format: {action_type: {params}}
@@ -96,7 +96,7 @@ class DeterministicWorkflowConverter:
 					print(f'   🧠 Agent reasoning: {reasoning_preview}')
 
 				# Get interacted element data if available
-				element_data = self._get_element_data(history, action_params)
+				element_data = self._get_element_data(history, action_params, action_pos)
 
 				# Convert action to semantic step with context and duration
 				step = self._convert_action_to_step(action_type, action_params, element_data, agent_context, step_duration)
@@ -110,7 +110,7 @@ class DeterministicWorkflowConverter:
 		print(f'\n📊 Total steps generated: {len(steps)}')
 		return steps
 
-	def _get_element_data(self, history, action_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+	def _get_element_data(self, history, action_dict: Dict[str, Any], action_pos: Optional[int] = None) -> Optional[Dict[str, Any]]:
 		"""
 		Extract element data from the DOM using the box overlay index.
 
@@ -176,18 +176,16 @@ class DeterministicWorkflowConverter:
 		except Exception as e:
 			print(f'      Error accessing state dict: {e}')
 
-		# Fallback to old method
+		# Fallback: position-aligned history element. model_output.action[i]
+		# acted on state.interacted_element[i]; browser-use 0.13 nodes carry no
+		# highlight_index attribute, so the old matching loop never found one.
 		interacted_elements = history.state.interacted_element
 		print(f'      Number of interacted elements: {len(interacted_elements)}')
 
-		# Try to find by highlight_index (the box number)
 		matching_element = None
-		for i, element in enumerate(interacted_elements):
-			if element:
-				if hasattr(element, 'highlight_index') and element.highlight_index == index:
-					matching_element = element
-					print('      ✓ Found by highlight_index match')
-					break
+		if action_pos is not None and action_pos < len(interacted_elements) and interacted_elements[action_pos]:
+			matching_element = interacted_elements[action_pos]
+			print(f'      ✓ Found by action position {action_pos}')
 
 		if matching_element is None:
 			print(f'   ⚠️  Could not find element with index {index} - returning None')
