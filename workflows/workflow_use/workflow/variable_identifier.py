@@ -31,6 +31,20 @@ class VariableType(str, Enum):
 	PASSWORD = 'password'
 
 
+# Types whose recorded value must NEVER be persisted as a plaintext default,
+# regardless of detection confidence (a context-detected password at 0.85 is
+# just as much a secret as a pattern-detected one at 0.95).
+SENSITIVE_VARIABLE_TYPES = frozenset(
+	{
+		VariableType.PASSWORD,
+		VariableType.CREDIT_CARD,
+		VariableType.SSN,
+		VariableType.EMAIL,
+		VariableType.PHONE,
+	}
+)
+
+
 @dataclass
 class VariableCandidate:
 	"""A candidate value that could be parameterized as a variable."""
@@ -492,11 +506,16 @@ class VariableIdentifier:
 				entry['description'] = candidate.description
 
 			# Add a default so the workflow can run without user input - EXCEPT for
-			# high-confidence sensitive matches (SSN, credit card, password, ...),
-			# where suggested_default is deliberately None: persisting the recorded
-			# value as a plaintext default would write the secret into the saved
-			# .workflow.yaml on disk.
-			if candidate.suggested_default is not None:
+			# sensitive TYPES (password, credit card, SSN, email, phone): persisting
+			# the recorded value as a plaintext default would write the secret into
+			# the saved .workflow.yaml on disk. Type-based, not confidence-based -
+			# a context-detected password at 0.85 is just as much a secret.
+			is_sensitive = candidate.variable_type in SENSITIVE_VARIABLE_TYPES
+			if is_sensitive:
+				# Only an already-masked capture may surface as a default
+				if candidate.value == '********':
+					entry['default'] = candidate.value
+			elif candidate.suggested_default is not None:
 				entry['default'] = candidate.suggested_default
 			elif candidate.confidence < 0.95:
 				# Low-confidence candidate without an explicit suggestion

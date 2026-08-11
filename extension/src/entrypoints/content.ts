@@ -303,9 +303,10 @@ function startRecorder() {
         chrome.runtime.sendMessage({ type: "RRWEB_EVENT", payload: event });
       }
     },
-    maskInputOptions: {
-      password: true,
-    },
+    // Defense-in-depth: nothing downstream consumes rrweb input data (only
+    // Scroll + Meta events are forwarded), so mask EVERY input at the rrweb
+    // layer - OTP/card/phone values can never ride along in any rrweb payload.
+    maskAllInputs: true,
     // No periodic checkouts: forced full snapshots were pure dead weight for
     // step conversion (only Scroll + Meta events are consumed).
   });
@@ -362,8 +363,11 @@ function isSensitiveField(element: HTMLElement): boolean {
   const type = (el.type || "").toLowerCase();
   if (type === "password") return true;
   if (el.tagName.toLowerCase() !== "input" && el.tagName.toLowerCase() !== "textarea") return false;
+  // Phone numbers are PII: a real number typed into a tel field is exactly
+  // what leaked into a saved workflow before this masking existed.
+  if (type === "tel") return true;
   const autocomplete = (el.getAttribute("autocomplete") || "").toLowerCase();
-  if (/(one-time-code|cc-number|cc-csc|cc-exp|new-password|current-password)/.test(autocomplete)) {
+  if (/(one-time-code|cc-number|cc-csc|cc-exp|new-password|current-password|\btel\b)/.test(autocomplete)) {
     return true;
   }
   const hints = [
@@ -374,7 +378,7 @@ function isSensitiveField(element: HTMLElement): boolean {
   ]
     .join(" ")
     .toLowerCase();
-  return /(password|passwd|pwd|otp\b|one.?time|verification.?code|security.?code|cvv|cvc|csc\b|card.?number|kart.?no|ssn\b|social.?security|tckn|tc.?kimlik|iban)/.test(
+  return /(password|passwd|pwd|otp\b|one.?time|verification.?code|security.?code|cvv|cvc|csc\b|card.?number|kart.?no|ssn\b|social.?security|tckn|tc.?kimlik|iban|telefon|phone|gsm\b|cep.?tel)/.test(
     hints
   );
 }
