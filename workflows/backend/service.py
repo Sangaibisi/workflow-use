@@ -171,17 +171,23 @@ class WorkflowService:
 		if position >= current_size:
 			return [], position
 
-		async with aiofiles.open(log_file, 'r') as f:
+		# Read in BINARY and decode: text-mode seek to a raw byte offset lands
+		# mid-multibyte-character on UTF-8 content and raises on read. Positions
+		# are byte offsets from _log_file_position()/stat().st_size, so binary is
+		# the correct mode.
+		async with aiofiles.open(log_file, 'rb') as f:
 			await f.seek(position)
-			all_logs = await f.readlines()
-			new_logs = [
-				line
-				for line in all_logs
-				if not line.strip().startswith('INFO:')
-				and not line.strip().startswith('WARNING:')
-				and not line.strip().startswith('DEBUG:')
-				and not line.strip().startswith('ERROR:')
-			]
+			raw = await f.read()
+		text = raw.decode('utf-8', errors='replace')
+		new_logs = [
+			line + '\n'
+			for line in text.split('\n')
+			if line.strip()
+			and not line.strip().startswith('INFO:')
+			and not line.strip().startswith('WARNING:')
+			and not line.strip().startswith('DEBUG:')
+			and not line.strip().startswith('ERROR:')
+		]
 		return new_logs, current_size
 
 	async def _write_log(self, log_file: Path, message: str) -> None:
@@ -213,17 +219,40 @@ class WorkflowService:
 			entries.append(entry)
 		return entries
 
+	def _resolve_workflow_path(self, name: str) -> Path:
+		"""Resolve *name* to a workflow file strictly inside tmp_dir.
+
+		Rejects path traversal ('../', absolute paths, symlinks escaping tmp_dir):
+		the update endpoints previously wrote YAML anywhere the backend user could
+		reach via a crafted filename.
+		"""
+		if not (name.endswith('.workflow.json') or name.endswith('.workflow.yaml') or name.endswith('.workflow.yml')):
+			raise ValueError(f"File '{name}' is not a valid workflow file")
+		tmp_root = self.tmp_dir.resolve()
+		candidate = (tmp_root / name).resolve()
+		if candidate.parent != tmp_root:
+			raise ValueError(f"Invalid workflow path '{name}'")
+		return candidate
+
+	@staticmethod
+	def _dump_workflow(content: dict, wf_file: Path) -> None:
+		"""Write workflow content back in its ON-DISK format (JSON stays JSON).
+
+		The update endpoints used to re-serialize every file as YAML, silently
+		corrupting .workflow.json files that strict-JSON consumers depend on.
+		"""
+		if wf_file.suffix == '.json' or wf_file.name.endswith('.workflow.json'):
+			wf_file.write_text(json.dumps(content, indent=2, default=json_serializer))
+		else:
+			wf_file.write_text(yaml.dump(content, default_flow_style=False, sort_keys=False, allow_unicode=True))
+
 	def get_workflow(self, name: str) -> str:
 		"""Get workflow content, converting YAML to JSON for frontend compatibility."""
-		wf_file = self.tmp_dir / name
+		wf_file = self._resolve_workflow_path(name)
 
 		# Validate file exists
 		if not wf_file.exists():
 			raise FileNotFoundError(f"Workflow file '{name}' not found")
-
-		# Validate file is a workflow file
-		if not (name.endswith('.workflow.json') or name.endswith('.workflow.yaml') or name.endswith('.workflow.yml')):
-			raise ValueError(f"File '{name}' is not a valid workflow file")
 
 		try:
 			# Load YAML/JSON and convert to JSON for frontend compatibility
@@ -242,7 +271,10 @@ class WorkflowService:
 		if not (workflow_filename and node_id is not None and updated_step_data):
 			return WorkflowResponse(success=False, error='Missing required fields')
 
-		wf_file = self.tmp_dir / workflow_filename
+		try:
+			wf_file = self._resolve_workflow_path(workflow_filename)
+		except ValueError as e:
+			return WorkflowResponse(success=False, error=str(e))
 		if not wf_file.exists():
 			return WorkflowResponse(success=False, error=f"Workflow file '{workflow_filename}' not found")
 
@@ -251,7 +283,7 @@ class WorkflowService:
 
 		if 0 <= int(node_id) < len(steps):
 			steps[int(node_id)] = updated_step_data
-			wf_file.write_text(yaml.dump(workflow_content, default_flow_style=False, sort_keys=False))
+			self._dump_workflow(workflow_content, wf_file)
 			return WorkflowResponse(success=True)
 
 		return WorkflowResponse(success=False, error='Node not found in workflow')
@@ -263,7 +295,10 @@ class WorkflowService:
 		if not (workflow_name and updated_metadata):
 			return WorkflowResponse(success=False, error='Missing required fields')
 
-		wf_file = self.tmp_dir / workflow_name
+		try:
+			wf_file = self._resolve_workflow_path(workflow_name)
+		except ValueError as e:
+			return WorkflowResponse(success=False, error=str(e))
 		if not wf_file.exists():
 			return WorkflowResponse(success=False, error='Workflow not found')
 
@@ -275,7 +310,7 @@ class WorkflowService:
 		if 'input_schema' in updated_metadata:
 			workflow_content['input_schema'] = updated_metadata['input_schema']
 
-		wf_file.write_text(yaml.dump(workflow_content, default_flow_style=False, sort_keys=False))
+		self._dump_workflow(workflow_content, wf_file)
 		return WorkflowResponse(success=True)
 
 	async def run_workflow_in_background(
@@ -287,19 +322,30 @@ class WorkflowService:
 		workflow_name = request.name
 		inputs = request.inputs
 		log_file = self.log_dir / 'backend.log'
+		# Concurrent runs share one log file; tag every line with the short task id
+		# so the GUI viewer's interleaved output is at least attributable.
+		tid = task_id[:8]
 		try:
 			self._prune_finished_tasks()
 			self.active_tasks[task_id] = TaskInfo(status='running', workflow=workflow_name)
-			ts = time.strftime('%Y-%m-%d %H:%M:%S')
+			ts = f'{time.strftime("%Y-%m-%d %H:%M:%S")} {tid}'
 			await self._write_log(log_file, f"[{ts}] Starting workflow '{workflow_name}'\n")
-			await self._write_log(log_file, f'[{ts}] Input parameters: {json.dumps(inputs, default=json_serializer)}\n')
+			# Log only the input KEY NAMES: values can be passwords/PII, and
+			# backend.log is shared and surfaced in the GUI log viewer.
+			await self._write_log(log_file, f'[{ts}] Input parameters: {sorted((inputs or {}).keys())}\n')
 
 			if cancel_event.is_set():
 				await self._write_log(log_file, f'[{ts}] Workflow cancelled before execution\n')
 				self.active_tasks[task_id].status = 'cancelled'
 				return
 
-			workflow_path = self.tmp_dir / workflow_name
+			try:
+				workflow_path = self._resolve_workflow_path(workflow_name)
+			except ValueError as e:
+				await self._write_log(log_file, f'[{ts}] Invalid workflow name: {e}\n')
+				self.active_tasks[task_id].status = 'failed'
+				self.active_tasks[task_id].error = str(e)
+				return
 			try:
 				workflow_obj = Workflow.load_from_file(
 					str(workflow_path), llm=self.llm_instance, browser=Browser(), controller=WorkflowController()

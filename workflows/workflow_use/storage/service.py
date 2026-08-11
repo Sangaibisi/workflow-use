@@ -54,27 +54,47 @@ class WorkflowStorageService:
 		self._load_metadata()
 
 	def _load_metadata(self) -> None:
-		"""Load workflow metadata from disk."""
-		if self.metadata_file.exists():
-			try:
-				with open(self.metadata_file, 'r') as f:
-					data = json.load(f)
-					self.metadata = {wf_id: WorkflowMetadata(**wf_data) for wf_id, wf_data in data.items()}
-				logger.info(f'Loaded {len(self.metadata)} workflow metadata entries')
-			except Exception as e:
-				logger.error(f'Error loading metadata: {e}')
-				self.metadata = {}
-		else:
+		"""Load workflow metadata from disk.
+
+		Per-entry tolerant: one malformed entry is skipped with a warning instead
+		of wiping the entire metadata store (the whole-file try/except used to
+		drop every workflow's metadata on a single bad record).
+		"""
+		if not self.metadata_file.exists():
 			logger.info('No existing metadata file, starting fresh')
+			return
+		try:
+			with open(self.metadata_file, 'r') as f:
+				data = json.load(f)
+		except Exception as e:
+			logger.error(f'Error reading metadata file (starting fresh): {e}')
+			self.metadata = {}
+			return
+		self.metadata = {}
+		for wf_id, wf_data in (data or {}).items():
+			try:
+				self.metadata[wf_id] = WorkflowMetadata(**wf_data)
+			except Exception as e:
+				logger.warning(f'Skipping malformed metadata entry {wf_id!r}: {e}')
+		logger.info(f'Loaded {len(self.metadata)} workflow metadata entries')
 
 	def _save_metadata(self) -> None:
-		"""Save workflow metadata to disk."""
+		"""Save workflow metadata to disk atomically (write temp + os.replace).
+
+		A crash mid-write used to leave a truncated JSON file that then failed to
+		load; the atomic replace guarantees the file is always a complete record.
+		"""
+		import os
+
+		tmp_path = self.metadata_file.with_suffix('.json.tmp')
 		try:
-			with open(self.metadata_file, 'w') as f:
+			with open(tmp_path, 'w') as f:
 				json.dump({wf_id: wf.model_dump() for wf_id, wf in self.metadata.items()}, f, indent=2)
+			os.replace(tmp_path, self.metadata_file)
 			logger.info(f'Saved metadata for {len(self.metadata)} workflows')
 		except Exception as e:
 			logger.error(f'Error saving metadata: {e}')
+			tmp_path.unlink(missing_ok=True)
 			raise
 
 	def save_workflow(

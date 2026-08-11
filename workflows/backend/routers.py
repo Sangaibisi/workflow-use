@@ -49,7 +49,13 @@ async def list_workflow_metadata():
 @router.get('/{name}', response_model=str)
 async def get_workflow(name: str):
 	service = get_service()
-	return service.get_workflow(name)
+	try:
+		return service.get_workflow(name)
+	except FileNotFoundError:
+		raise HTTPException(status_code=404, detail=f'Workflow {name} not found')
+	except ValueError as e:
+		# invalid name / unparseable file — a client error, not a 500
+		raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post('/update', response_model=WorkflowResponse)
