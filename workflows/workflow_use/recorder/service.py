@@ -129,26 +129,32 @@ class RecordingService:
 			print(f'[Service] Error in event processing task: {e}')
 
 	async def _capture_and_signal_final_workflow(self, trigger_reason: str):
-		processed_this_call = False
 		async with self.final_workflow_processed_lock:
-			if not self.final_workflow_processed_flag and self.last_workflow_update_event:
-				print(f'[Service] Capturing final workflow (Trigger: {trigger_reason}).')
-				self.final_workflow_output = self.last_workflow_update_event.payload
+			if not self.final_workflow_processed_flag:
+				if self.last_workflow_update_event:
+					print(f'[Service] Capturing final workflow (Trigger: {trigger_reason}).')
+					self.final_workflow_output = self.last_workflow_update_event.payload
+				else:
+					# Zero captured steps is a valid way for a session to end; the
+					# completion event must still fire or capture_workflow() waits forever.
+					print(f'[Service] No workflow update received before {trigger_reason}; finishing with empty recording.')
 				self.final_workflow_processed_flag = True
-				processed_this_call = True
 
-		if processed_this_call:
-			print('[Service] Final workflow captured. Setting recording_complete_event.')
-			self.recording_complete_event.set()  # Signal completion to the main method
+		# ALWAYS unblock capture_workflow - previously this was gated on having
+		# received a WORKFLOW_UPDATE, so stopping (or closing the browser) before
+		# any step was captured hung the CLI forever.
+		print(f'[Service] Setting recording_complete_event (Trigger: {trigger_reason}).')
+		self.recording_complete_event.set()
 
-			# If processing was due to RecordingStoppedEvent, also try to close the browser
-			if trigger_reason == 'RecordingStoppedEvent' and self.browser:
-				print('[Service] Attempting to close browser due to RecordingStoppedEvent...')
-				try:
-					await self.browser.stop()
-					print('[Service] Browser close command issued.')
-				except Exception as e_close:
-					print(f'[Service] Error closing browser on recording stop: {e_close}')
+		# If processing was due to RecordingStoppedEvent, also try to close the browser
+		browser = getattr(self, 'browser', None)
+		if trigger_reason == 'RecordingStoppedEvent' and browser:
+			print('[Service] Attempting to close browser due to RecordingStoppedEvent...')
+			try:
+				await browser.stop()
+				print('[Service] Browser close command issued.')
+			except Exception as e_close:
+				print(f'[Service] Error closing browser on recording stop: {e_close}')
 
 	async def _launch_browser_and_wait(self):
 		print(f'[Service] Attempting to load extension from: {EXT_DIR}')
@@ -201,7 +207,8 @@ class RecordingService:
 
 		except asyncio.CancelledError:
 			print('[Service] Browser task cancelled.')
-			if self.browser:
+			# self.browser only exists once launch reached Browser(...) - guard it
+			if getattr(self, 'browser', None):
 				try:
 					await self.browser.stop()
 				except Exception:
@@ -267,7 +274,7 @@ class RecordingService:
 				except Exception as e_browser_cancel:
 					print(f'[Service] Error awaiting cancelled browser task: {e_browser_cancel}')
 
-			if self.browser:  # Final check to close browser if still open
+			if getattr(self, 'browser', None):  # Final check to close browser if still open
 				print('[Service] Ensuring browser is closed in cleanup...')
 				try:
 					self.browser.browser_profile.keep_alive = False
