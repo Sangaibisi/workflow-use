@@ -100,4 +100,6 @@ allow-direct-references = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+# tests/ plus the nested per-package suites; a bare `tests` here silently
+# dropped workflow_use/*/tests and the top-level regression file.
+testpaths = ["tests", "workflow_use", "test_max_alternatives_bug_fix.py"]

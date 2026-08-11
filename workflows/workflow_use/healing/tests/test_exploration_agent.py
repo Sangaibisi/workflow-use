@@ -3,6 +3,11 @@ import logging
 import os
 from pathlib import Path
 
+import pytest
+
+if not os.environ.get('RUN_LLM_TESTS'):
+	pytest.skip('live LLM/browser integration; set RUN_LLM_TESTS=1 to run', allow_module_level=True)
+
 from browser_use import Agent, Browser
 from browser_use.llm import ChatBrowserUse
 from pydantic import SecretStr

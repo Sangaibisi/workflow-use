@@ -105,6 +105,10 @@ class VariableExtractor:
 	# Value is captured until whitespace or end of string
 	MANUAL_MARKER_PATTERN = re.compile(r'VAR:([a-z_][a-z0-9_]*):(\S+)')
 
+	# A marker that owns the entire field: its value runs to the end of the
+	# field and may therefore contain spaces (VAR:user_name:John Doe).
+	WHOLE_FIELD_MARKER_PATTERN = re.compile(r'VAR:([a-z_][a-z0-9_]*):(.+)', re.DOTALL)
+
 	def __init__(self, llm: Optional[BaseChatModel] = None):
 		"""Initialize the variable extractor.
 
@@ -188,6 +192,20 @@ class VariableExtractor:
 			if not field_value or not isinstance(field_value, str):
 				continue
 
+			# Whole-field form first: when the marker owns the entire field its
+			# value may contain spaces (VAR:user_name:John Doe -> {user_name}).
+			whole = self.WHOLE_FIELD_MARKER_PATTERN.fullmatch(field_value.strip())
+			if whole and not self.MANUAL_MARKER_PATTERN.search(whole.group(2)):
+				var_name = whole.group(1)
+				if var_name not in extracted_inputs:
+					extracted_inputs[var_name] = WorkflowInputSchemaDefinition(
+						name=var_name,
+						type='string',  # Default to string
+						required=True,
+					)
+				setattr(step, field_name, f'{{{var_name}}}')
+				continue
+
 			markers = self.extract_manual_markers(field_value)
 			if not markers:
 				continue
@@ -203,8 +221,11 @@ class VariableExtractor:
 						required=True,
 					)
 
-				# Replace entire field value with placeholder (since marker is the whole value)
-				updated_value = f'{{{var_name}}}'
+				# Replace only the marker span. Markers are often embedded in a
+				# larger value (e.g. a URL query: ?q=VAR:search_term:laptop) -
+				# clobbering the whole field destroyed the surrounding text and,
+				# with several markers, kept only the last placeholder.
+				updated_value = updated_value.replace(marker_text, f'{{{var_name}}}')
 
 			# Update the field
 			setattr(step, field_name, updated_value.strip())

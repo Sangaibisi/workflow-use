@@ -378,7 +378,10 @@ function isSensitiveField(element: HTMLElement): boolean {
   ]
     .join(" ")
     .toLowerCase();
-  return /(password|passwd|pwd|otp\b|one.?time|verification.?code|security.?code|cvv|cvc|csc\b|card.?number|kart.?no|ssn\b|social.?security|tckn|tc.?kimlik|iban|telefon|phone|gsm\b|cep.?tel)/.test(
+  // Phone vocabulary must cover fields that are NOT type="tel": mobile/cell
+  // naming conventions (EN) and mobil/cep (TR) are how sites commonly name
+  // free-text phone inputs.
+  return /(password|passwd|pwd|otp\b|one.?time|verification.?code|security.?code|cvv|cvc|csc\b|card.?number|kart.?no|ssn\b|social.?security|tckn|tc.?kimlik|iban|secret|token\b|telefon|phone|gsm\b|mobile|mobil\b|\bcell(ular)?\b|msisdn|\bcep\b|cep.?tel)/.test(
     hints
   );
 }

@@ -532,8 +532,22 @@ class SemanticExtractor:
                     
                     if (!labelText) {
                         const prevElement = el.previousElementSibling;
-                        if (prevElement && (prevElement.tagName === 'LABEL' || prevElement.textContent)) {
-                            labelText = prevElement.textContent?.trim() || '';
+                        if (prevElement) {
+                            if (prevElement.tagName === 'LABEL') {
+                                labelText = prevElement.textContent?.trim() || '';
+                            } else {
+                                // A short-text sibling may act as a label, but only
+                                // for form fields. The old catch-all (any sibling
+                                // with textContent) made buttons/links adopt the
+                                // PREVIOUS element's text - e.g. a Cancel button
+                                // keyed as "Submit Form", or a link keyed as the
+                                // entire form's text.
+                                const isFormField = ['INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName);
+                                const prevText = prevElement.textContent?.trim() || '';
+                                if (isFormField && prevText && prevText.length < 50) {
+                                    labelText = prevText;
+                                }
+                            }
                         }
                     }
 

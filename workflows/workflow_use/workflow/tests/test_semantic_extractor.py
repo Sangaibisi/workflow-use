@@ -1,15 +1,30 @@
 """
 Tests for SemanticExtractor functionality.
+
+The browser-backed tests launch a real local browser (data: URLs only, no
+network) and are skipped by default; run with RUN_BROWSER_TESTS=1.
 """
 
-import asyncio
+import os
+import urllib.parse
 
 import pytest
 from browser_use import Browser
 
 from workflow_use.workflow.semantic_extractor import SemanticExtractor
 
+requires_browser = pytest.mark.skipif(
+	not os.environ.get('RUN_BROWSER_TESTS'),
+	reason='Live-browser integration test; set RUN_BROWSER_TESTS=1 to run',
+)
 
+
+async def _set_content(page, html: str) -> None:
+	"""The CDP surface has no Playwright set_content; load markup via a data: URL."""
+	await page.goto('data:text/html;charset=utf-8,' + urllib.parse.quote(html))
+
+
+@requires_browser
 class TestSemanticExtractor:
 	"""Test suite for SemanticExtractor."""
 
@@ -17,6 +32,7 @@ class TestSemanticExtractor:
 	async def browser(self):
 		"""Create a browser instance for testing."""
 		browser = Browser()
+		await browser.start()
 		yield browser
 		await browser.close()
 
@@ -38,12 +54,12 @@ class TestSemanticExtractor:
                     <label for="firstName">First Name</label>
                     <input id="firstName" name="firstName" type="text" required>
                 </div>
-                
+
                 <div>
                     <label for="email">Email Address</label>
                     <input id="email" name="email" type="email" placeholder="Enter your email">
                 </div>
-                
+
                 <div>
                     <label>Gender</label>
                     <input type="radio" id="male" name="gender" value="male">
@@ -51,7 +67,7 @@ class TestSemanticExtractor:
                     <input type="radio" id="female" name="gender" value="female">
                     <label for="female">Female</label>
                 </div>
-                
+
                 <div>
                     <label for="country">Country</label>
                     <select id="country" name="country">
@@ -59,11 +75,11 @@ class TestSemanticExtractor:
                         <option value="ca">Canada</option>
                     </select>
                 </div>
-                
+
                 <button type="submit" id="submitBtn">Submit Form</button>
                 <button type="button" class="cancel-btn">Cancel</button>
             </form>
-            
+
             <div>
                 <a href="/help" class="help-link">Get Help</a>
                 <span class="info-text">Additional information here</span>
@@ -75,7 +91,7 @@ class TestSemanticExtractor:
 	async def test_extract_elements_basic(self, browser, extractor, sample_html):
 		"""Test basic element extraction."""
 		page = await browser.get_current_page()
-		await page.set_content(sample_html)
+		await _set_content(page, sample_html)
 
 		mapping = await extractor.extract_semantic_mapping(page)
 
@@ -83,7 +99,7 @@ class TestSemanticExtractor:
 		assert len(mapping) > 0
 
 		# Check for form inputs
-		assert any('firstName' in key.lower() for key in mapping.keys())
+		assert any('first name' in key.lower() for key in mapping.keys())
 		assert any('email' in key.lower() for key in mapping.keys())
 
 		# Check for buttons
@@ -93,7 +109,7 @@ class TestSemanticExtractor:
 	async def test_element_mapping_structure(self, browser, extractor, sample_html):
 		"""Test that element mapping has correct structure."""
 		page = await browser.get_current_page()
-		await page.set_content(sample_html)
+		await _set_content(page, sample_html)
 
 		mapping = await extractor.extract_semantic_mapping(page)
 
@@ -110,7 +126,7 @@ class TestSemanticExtractor:
 	async def test_fuzzy_matching(self, browser, extractor, sample_html):
 		"""Test fuzzy text matching."""
 		page = await browser.get_current_page()
-		await page.set_content(sample_html)
+		await _set_content(page, sample_html)
 
 		mapping = await extractor.extract_semantic_mapping(page)
 
@@ -142,7 +158,7 @@ class TestSemanticExtractor:
         """
 
 		page = await browser.get_current_page()
-		await page.set_content(html_with_duplicates)
+		await _set_content(page, html_with_duplicates)
 
 		mapping = await extractor.extract_semantic_mapping(page)
 
@@ -153,7 +169,7 @@ class TestSemanticExtractor:
 	async def test_selector_generation(self, browser, extractor, sample_html):
 		"""Test CSS selector generation."""
 		page = await browser.get_current_page()
-		await page.set_content(sample_html)
+		await _set_content(page, sample_html)
 
 		mapping = await extractor.extract_semantic_mapping(page)
 
@@ -185,14 +201,14 @@ class TestSemanticExtractor:
                     <input id="lastName" name="lastName" placeholder="Last Name" required>
                     <input id="socialSecurityLast4" name="socialSecurityLast4" maxlength="4" placeholder="Last 4 SSN">
                 </div>
-                
+
                 <div class="radio-group">
                     <span>Gender</span>
                     <label><input type="radio" name="gender" value="male">Male</label>
                     <label><input type="radio" name="gender" value="female">Female</label>
                     <label><input type="radio" name="gender" value="other">Other</label>
                 </div>
-                
+
                 <div class="actions">
                     <button type="submit" class="primary-btn">Next: Contact Information</button>
                     <button type="button" class="secondary-btn">Save Draft</button>
@@ -202,7 +218,7 @@ class TestSemanticExtractor:
         """
 
 		page = await browser.get_current_page()
-		await page.set_content(complex_html)
+		await _set_content(page, complex_html)
 
 		mapping = await extractor.extract_semantic_mapping(page)
 
@@ -227,21 +243,31 @@ class TestSemanticExtractor:
 		# Should find most elements
 		assert len(found_elements) >= len(expected_elements) - 1
 
-	def test_text_normalization(self, extractor):
-		"""Test text normalization for matching."""
-		# Test the normalization function
+
+class TestTextNormalization:
+	"""Pure-unit contract of SemanticExtractor._normalize_text (no browser)."""
+
+	def test_text_normalization(self):
+		"""Whitespace collapses; case is PRESERVED.
+
+		Mapping keys are display-facing (they surface in workflow files as
+		target_text), so the extractor keeps the on-page casing and
+		find_element_by_text lowercases at lookup time instead.
+		"""
+		extractor = SemanticExtractor()
 		test_cases = [
-			('  Hello World  ', 'hello world'),
-			('First Name*', 'first name*'),
-			('Email\nAddress', 'email address'),
-			('SUBMIT BUTTON', 'submit button'),
+			('  Hello World  ', 'Hello World'),
+			('First Name*', 'First Name*'),
+			('Email\nAddress', 'Email Address'),
+			('SUBMIT BUTTON', 'SUBMIT BUTTON'),
+			('', ''),
 		]
 
 		for input_text, expected in test_cases:
-			normalized = extractor._normalize_text(input_text)
-			assert normalized == expected
+			assert extractor._normalize_text(input_text) == expected
 
 
+@requires_browser
 class TestSemanticWorkflowIntegration:
 	"""Integration tests for semantic workflow execution."""
 
@@ -249,15 +275,15 @@ class TestSemanticWorkflowIntegration:
 	async def browser(self):
 		"""Create a browser instance for testing."""
 		browser = Browser()
+		await browser.start()
 		yield browser
 		await browser.close()
 
 	async def test_real_page_extraction(self, browser):
-		"""Test extraction from a real webpage."""
+		"""Test extraction from a realistic login form."""
 		extractor = SemanticExtractor()
 		page = await browser.get_current_page()
 
-		# Navigate to a simple test page
 		test_html = """
         <html><body>
             <h1>Test Page</h1>
@@ -270,7 +296,7 @@ class TestSemanticWorkflowIntegration:
         </body></html>
         """
 
-		await page.set_content(test_html)
+		await _set_content(page, test_html)
 		mapping = await extractor.extract_semantic_mapping(page)
 
 		# Verify we can find elements by common names
@@ -284,32 +310,4 @@ class TestSemanticWorkflowIntegration:
 
 
 if __name__ == '__main__':
-	# Run basic tests if executed directly
-	async def run_basic_test():
-		"""Run a basic test to verify functionality."""
-		browser = Browser()
-		try:
-			extractor = SemanticExtractor()
-			page = await browser.get_current_page()
-
-			# Simple test HTML
-			html = """
-            <html><body>
-                <input id="test" name="test" placeholder="Test Input">
-                <button>Click Me</button>
-            </body></html>
-            """
-
-			await page.set_content(html)
-			mapping = await extractor.extract_semantic_mapping(page)
-
-			print('✅ Basic extraction test passed')
-			print(f'Extracted {len(mapping)} elements')
-
-			for text, info in mapping.items():
-				print(f'  - {text}: {info["selectors"]}')
-
-		finally:
-			await browser.close()
-
-	asyncio.run(run_basic_test())
+	pytest.main([__file__, '-v'])

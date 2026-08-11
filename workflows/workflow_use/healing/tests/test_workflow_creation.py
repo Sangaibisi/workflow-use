@@ -1,6 +1,12 @@
 import asyncio
 import json
+import os
 from pathlib import Path
+
+import pytest
+
+if not os.environ.get('RUN_LLM_TESTS'):
+	pytest.skip('live LLM integration; set RUN_LLM_TESTS=1 to run', allow_module_level=True)
 
 import aiofiles
 from browser_use import AgentHistoryList
