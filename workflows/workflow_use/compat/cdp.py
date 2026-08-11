@@ -323,3 +323,28 @@ async def press_key_on_element(page: 'Page', element: 'Element', key: str) -> No
 	"""Playwright ``locator.press`` equivalent: focus the element, press on page."""
 	await element.focus()
 	await page.press(key)
+
+
+_FILL_CONTENTEDITABLE_JS = """(value) => {
+	if (!this.isContentEditable) {
+		return 'not-contenteditable';
+	}
+	this.focus();
+	this.textContent = value;
+	this.dispatchEvent(new InputEvent('input', { bubbles: true }));
+	this.dispatchEvent(new Event('change', { bubbles: true }));
+	return 'ok';
+}"""
+
+
+async def fill_element(element: 'Element', value: str) -> None:
+	"""``Element.fill`` that also understands contenteditable hosts.
+
+	Rich-text editors have no ``value`` property, so ``fill`` cannot drive
+	them; the recorded InputStep is replayed by setting textContent and firing
+	input/change events instead.
+	"""
+	result = await evaluate(element, _FILL_CONTENTEDITABLE_JS, value)
+	if result == 'ok':
+		return
+	await element.fill(value)

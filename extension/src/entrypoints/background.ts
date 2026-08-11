@@ -307,6 +307,20 @@ export default defineBackground(() => {
     return uiWorkflowData; // Return UI format to extension
   }
 
+  // Inject the manifest-registered content script into a tab that doesn't
+  // have it yet (opened before the extension loaded / was reloaded). The
+  // script itself guards against double-injection.
+  async function injectRecorderIntoTab(tabId: number): Promise<boolean> {
+    const files = chrome.runtime.getManifest().content_scripts?.[0]?.js;
+    if (!files || files.length === 0) return false;
+    try {
+      await chrome.scripting.executeScript({ target: { tabId }, files });
+      return true;
+    } catch {
+      return false; // chrome://, web store and other restricted pages
+    }
+  }
+
   // Function to broadcast the recording status to all content scripts and sidepanel
   function broadcastRecordingStatus() {
     const statusString = isRecordingEnabled ? "recording" : "stopped"; // Map boolean to string status
@@ -314,14 +328,27 @@ export default defineBackground(() => {
     chrome.tabs.query({}, (tabs) => {
       tabs.forEach((tab) => {
         if (tab.id) {
+          const tabId = tab.id;
           chrome.tabs
-            .sendMessage(tab.id, {
+            .sendMessage(tabId, {
               type: "SET_RECORDING_STATUS",
               payload: isRecordingEnabled,
             })
-            .catch((_err: Error) => {
-              // Optional: Log if sending to a specific tab failed (e.g., script not injected)
-              // console.debug(`Could not send status to tab ${tab.id}: ${_err.message}`);
+            .catch(async (_err: Error) => {
+              // No receiver: the tab was open before the extension loaded, so
+              // its content script never auto-injected - events from it were
+              // silently never recorded. Inject and resend.
+              if (!isRecordingEnabled) return;
+              if (await injectRecorderIntoTab(tabId)) {
+                chrome.tabs
+                  .sendMessage(tabId, {
+                    type: "SET_RECORDING_STATUS",
+                    payload: isRecordingEnabled,
+                  })
+                  .catch(() => {
+                    /* tab closed meanwhile */
+                  });
+              }
             });
         }
       });

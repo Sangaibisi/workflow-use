@@ -16,7 +16,9 @@ export default defineConfig({
     // storage: recording state survives MV3 service-worker termination
     // alarms: keepalive while a recording is active
     // webNavigation: typed navigation capture (address bar / back-forward / reload)
-    permissions: ["tabs", "sidePanel", "storage", "alarms", "webNavigation"],
+    // "scripting": inject the recorder into tabs that were already open when
+    // recording started (their content script only auto-loads on navigation).
+    permissions: ["tabs", "sidePanel", "storage", "alarms", "webNavigation", "scripting"],
     // <all_urls> is a match pattern and belongs in host_permissions ("tabs"
     // covers the API side); keeping it in permissions triggers a load warning.
     host_permissions: ["<all_urls>", "http://127.0.0.1/*"],

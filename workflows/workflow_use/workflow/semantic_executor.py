@@ -1572,8 +1572,9 @@ class SemanticWorkflowExecutor:
 				logger.info(msg)
 				return ActionResult(extracted_content=msg, include_in_memory=True)
 
-			# Regular input handling for text fields, etc.
-			await element.fill(step.value)
+			# Regular input handling for text fields etc.; fill_element also
+			# drives contenteditable hosts (rich-text editors)
+			await cdp.fill_element(element, step.value)
 			await asyncio.sleep(0.5)
 			# Click removed - not needed after fill and CDP doesn't support force parameter
 			await asyncio.sleep(0.5)

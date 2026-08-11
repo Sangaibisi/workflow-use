@@ -137,7 +137,8 @@ class WorkflowController(Controller):
 						include_in_memory=True,
 					)
 
-				await element.fill(params.value)
+				# fill_element also drives contenteditable hosts (rich-text editors)
+				await cdp.fill_element(element, params.value)
 				await asyncio.sleep(0.5)
 
 				logged_value = redact_step_value(params, params.value)

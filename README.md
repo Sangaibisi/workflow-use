@@ -145,6 +145,20 @@ python cli.py run-workflow examples/example.workflow.json
 python cli.py create-workflow
 ```
 
+### Known recording limitations
+
+- **File uploads** are not recorded: browsers only expose a `C:\fakepath\`
+  placeholder for `input[type=file]`, and no replay API can attach a local
+  file. The recorder logs a console warning and skips the step - attach the
+  file manually during replay.
+- **Drag & drop** interactions are not captured yet.
+- **Multi-tab flows** are flattened into a single step sequence; replay drives
+  one tab, so recordings that depend on switching between tabs will not replay
+  faithfully.
+
+Contenteditable (rich-text) typing IS recorded and replayed, and tabs that
+were already open when recording starts are injected automatically.
+
 ## See all commands
 
 ```bash

@@ -362,7 +362,13 @@ function isSensitiveField(element: HTMLElement): boolean {
   const el = element as HTMLInputElement;
   const type = (el.type || "").toLowerCase();
   if (type === "password") return true;
-  if (el.tagName.toLowerCase() !== "input" && el.tagName.toLowerCase() !== "textarea") return false;
+  if (
+    el.tagName.toLowerCase() !== "input" &&
+    el.tagName.toLowerCase() !== "textarea" &&
+    // contenteditable editors carry their hints in aria/name/id like any field
+    !element.isContentEditable
+  )
+    return false;
   // Phone numbers are PII: a real number typed into a tel field is exactly
   // what leaked into a saved workflow before this masking existed.
   if (type === "tel") return true;
@@ -927,12 +933,33 @@ function isElementVisible(element: HTMLElement): boolean {
 function handleInput(event: Event) {
   if (!isRecordingActive) return;
   const targetElement = event.target as HTMLInputElement | HTMLTextAreaElement;
-  if (!targetElement || !("value" in targetElement)) return;
+  if (!targetElement) return;
+  // Rich-text editors (contenteditable) have no `value` property, so the
+  // guard below used to drop their typing entirely - record their text here.
+  if (!("value" in targetElement)) {
+    const editableHost = (targetElement as HTMLElement).isContentEditable
+      ? ((targetElement as HTMLElement).closest('[contenteditable="true"], [contenteditable=""]') as HTMLElement | null) ||
+        (targetElement as HTMLElement)
+      : null;
+    if (editableHost) {
+      recordContentEditableInput(editableHost);
+    }
+    return;
+  }
   const inputTypeAttr = (targetElement as HTMLInputElement).type?.toLowerCase() || "";
   // Toggling a checkbox/radio fires an 'input' event whose value is the meaningless
   // literal "on" - that interaction is captured by the click handler, and recording
   // it here used to add a bogus InputStep that replay tried to type into the box.
   if (inputTypeAttr === "checkbox" || inputTypeAttr === "radio") return;
+  // File pickers can't be replayed (the browser exposes only a C:\fakepath\
+  // placeholder, and no replay API can attach a local file). Recording one
+  // used to produce a garbage InputStep that typed the fakepath string.
+  if (inputTypeAttr === "file") {
+    console.warn(
+      "workflow-use: file uploads cannot be replayed and are not recorded - attach the file manually during replay."
+    );
+    return;
+  }
   // Mask anything sensitive, not just type=password (OTP, card, CVV, SSN, ...)
   const isSensitive = isSensitiveField(targetElement as HTMLElement);
 
@@ -972,6 +999,42 @@ function handleInput(event: Event) {
     });
   } catch (error) {
     console.error("Error capturing input data:", error);
+  }
+}
+
+function recordContentEditableInput(host: HTMLElement) {
+  try {
+    const isSensitive = isSensitiveField(host);
+    const xpath = getXPath(host);
+    const semanticInfo = extractSemanticInfo(host);
+    const targetText =
+      semanticInfo.labelText ||
+      semanticInfo.ariaLabel ||
+      semanticInfo.placeholder ||
+      semanticInfo.name ||
+      semanticInfo.id ||
+      "";
+    const text = (host.innerText || host.textContent || "").slice(0, 2000);
+
+    chrome.runtime.sendMessage({
+      type: "CUSTOM_INPUT_EVENT",
+      payload: {
+        timestamp: Date.now(),
+        url: document.location.href,
+        frameUrl: window.location.href,
+        xpath,
+        cssSelector: getEnhancedCSSSelector(host, xpath),
+        elementTag: host.tagName,
+        value: isSensitive ? SENSITIVE_VALUE_MASK : text,
+        inputType: "contenteditable",
+        isContentEditable: true,
+        targetText,
+        semanticInfo,
+        selectorStrategies: generateSelectorStrategies(host, semanticInfo),
+      },
+    });
+  } catch (error) {
+    console.error("Error capturing contenteditable input:", error);
   }
 }
 // --- End Custom Input Handler ---
@@ -1240,6 +1303,18 @@ function handleBlur(_event: FocusEvent) {
 export default defineContentScript({
   matches: ["<all_urls>"],
   main(_ctx) {
+    // The background script injects this file into tabs that were already
+    // open when recording started. Guard against double-injection (manifest
+    // load + programmatic inject would duplicate every listener and record
+    // every event twice).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const w = window as any;
+    if (w.__workflowUseRecorderLoaded) {
+      console.debug("workflow-use recorder already present; skipping re-init");
+      return;
+    }
+    w.__workflowUseRecorderLoaded = true;
+
     // Listener for status updates from the background script
     chrome.runtime.onMessage.addListener((message, _sender, _sendResponse) => {
       if (message.type === "SET_RECORDING_STATUS") {
