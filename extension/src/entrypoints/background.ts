@@ -37,7 +37,9 @@ export default defineBackground(() => {
   // Track recent user interactions to distinguish intentional vs side-effect navigation
   const recentUserInteractions: { [tabId: number]: number } = {}; // timestamp of last user interaction
 
-  let isRecordingEnabled = true; // Default to disabled (OFF)
+  // Default ON: the recorder-launched browser is dedicated to recording and
+  // starts capturing immediately (the sidepanel Stop button ends the session).
+  let isRecordingEnabled = true;
   let lastWorkflowHash: string | null = null; // Cache for the last logged workflow hash
 
   const PYTHON_SERVER_ENDPOINT = "http://127.0.0.1:7331/event";

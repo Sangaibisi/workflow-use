@@ -2,7 +2,10 @@ import * as rrweb from "rrweb";
 import { EventType, IncrementalSource } from "@rrweb/types";
 
 let stopRecording: (() => void) | undefined = undefined;
-let isRecordingActive = true; // Content script's local state
+// False until startRecorder() actually runs - initializing this to true made
+// stopRecorder()'s early-out leave it stuck true on pages loaded while stopped,
+// and the SET_RECORDING_STATUS guard then never called startRecorder() again.
+let isRecordingActive = false; // Content script's local state
 let scrollTimeout: ReturnType<typeof setTimeout> | null = null;
 let lastScrollY: number | null = null;
 let lastDirection: "up" | "down" | null = null;
@@ -214,11 +217,13 @@ function startRecorder() {
 }
 
 function stopRecorder() {
+  // Unconditional: the flag must never stay true when the recorder isn't running
+  // (a stale true deadlocked the stop -> navigate -> start cycle).
+  isRecordingActive = false;
   if (stopRecording) {
     console.log("Stopping rrweb recorder for:", window.location.href);
     stopRecording();
     stopRecording = undefined;
-    isRecordingActive = false;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (window as any).rrwebStop = undefined; // Clean up window property
     // Remove custom listeners when recording stops
@@ -231,7 +236,7 @@ function stopRecorder() {
     document.removeEventListener("focus", handleFocus, true);
     document.removeEventListener("blur", handleBlur, true);
   } else {
-    console.log("Recorder not running, cannot stop.");
+    console.log("Recorder not running, nothing to stop.");
   }
 }
 
@@ -1051,9 +1056,11 @@ export default defineContentScript({
       if (message.type === "SET_RECORDING_STATUS") {
         const shouldBeRecording = message.payload;
         console.log(`Received recording status update: ${shouldBeRecording}`);
-        if (shouldBeRecording && !isRecordingActive) {
+        // Both functions are re-entrant; calling them unconditionally avoids
+        // ever wedging on a stale isRecordingActive value.
+        if (shouldBeRecording) {
           startRecorder();
-        } else if (!shouldBeRecording && isRecordingActive) {
+        } else {
           stopRecorder();
         }
       }
