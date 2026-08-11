@@ -64,7 +64,7 @@ class SelectorGenerator:
 	10. Direct CSS/xpath (fallback)
 	"""
 
-	def __init__(self, enable_xpath_optimization: bool = True, max_xpath_alternatives: int = 2, max_total_strategies: int = 2):
+	def __init__(self, enable_xpath_optimization: bool = True, max_xpath_alternatives: int = 2, max_total_strategies: int = 8):
 		"""
 		Initialize the SelectorGenerator.
 
@@ -73,8 +73,11 @@ class SelectorGenerator:
 		        robust XPath alternatives instead of a single XPath fallback
 		    max_xpath_alternatives: Maximum number of XPath alternatives to generate (default: 2)
 		        Includes the absolute xpath fallback, so 2 means 1 optimized + 1 absolute
-		    max_total_strategies: Maximum total number of strategies to return (default: 2)
-		        Limits the total number of strategies across all types (semantic + xpath)
+		    max_total_strategies: Maximum total number of strategies to return (default: 8)
+		        High enough that semantic strategies (7 types) are never truncated in
+		        practice - the old default of 2 silently discarded aria_label/
+		        placeholder/title/fuzzy/xpath fallbacks, gutting the multi-strategy
+		        resilience the feature exists for
 		"""
 		self.enable_xpath_optimization = enable_xpath_optimization
 		self.max_xpath_alternatives = max_xpath_alternatives

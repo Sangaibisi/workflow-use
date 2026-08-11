@@ -79,7 +79,10 @@ class HealingService:
 		self.selector_generator = SelectorGenerator(
 			enable_xpath_optimization=enable_xpath_optimization,
 			max_xpath_alternatives=2,  # Limit to 2 XPath alternatives (1 optimized + 1 absolute fallback)
-			max_total_strategies=2,  # Limit to 2 total strategies (semantic + xpath combined)
+			# Do NOT cap total strategies at 2: that silently discarded the
+			# aria_label/placeholder/title/fuzzy/xpath fallbacks and gutted the
+			# multi-strategy resilience this generator exists for.
+			max_total_strategies=8,
 		)  # Initialize multi-strategy selector generator
 		# Note: validator will be initialized with extraction_llm in generate_workflow_from_prompt
 		self.validator = None
