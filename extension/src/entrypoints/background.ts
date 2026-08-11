@@ -508,6 +508,7 @@ export default defineBackground(() => {
               xpath: clickEvent.xpath,
               elementTag: clickEvent.elementTag,
               elementText: clickEvent.elementText,
+              selectorStrategies: clickEvent.selectorStrategies,
               screenshot: clickEvent.screenshot,
             };
             
@@ -578,6 +579,7 @@ export default defineBackground(() => {
                 xpath: inputEvent.xpath,
                 elementTag: inputEvent.elementTag,
                 value: inputEvent.value,
+                selectorStrategies: inputEvent.selectorStrategies,
                 screenshot: inputEvent.screenshot,
               };
               

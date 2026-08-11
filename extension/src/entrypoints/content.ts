@@ -108,11 +108,118 @@ function getEnhancedCSSSelector(element: HTMLElement, xpath: string): string {
         }
       }
     }
-    return cssSelector;
+    return verifySelectorAtRecordTime(cssSelector, element);
   } catch (error) {
     console.error("Error generating enhanced CSS selector:", error);
     return `${element.tagName.toLowerCase()}[xpath="${xpath.replace(/"/g, '\\"')}"]`;
   }
+}
+
+// Record-time selector verification: a selector that is invalid or ambiguous
+// HERE will be invalid or click the wrong element at replay. Verify it against
+// the live DOM while we still can, and disambiguate with :nth-of-type.
+function verifySelectorAtRecordTime(cssSelector: string, element: HTMLElement): string {
+  let matches: NodeListOf<Element>;
+  try {
+    matches = document.querySelectorAll(cssSelector);
+  } catch {
+    // Invalid selector (shouldn't happen post-escaping) - safe tag fallback
+    console.warn("Generated selector is invalid CSS, falling back to tag:", cssSelector);
+    return element.tagName.toLowerCase();
+  }
+
+  if (matches.length === 1 && matches[0] === element) {
+    return cssSelector;
+  }
+
+  if (matches.length > 1) {
+    const parent = element.parentElement;
+    if (parent) {
+      const sameTagSiblings = Array.from(parent.children).filter(
+        (child) => child.tagName === element.tagName
+      );
+      const index = sameTagSiblings.indexOf(element) + 1;
+      if (index > 0) {
+        const candidate = `${cssSelector}:nth-of-type(${index})`;
+        try {
+          const candidateMatches = document.querySelectorAll(candidate);
+          if (candidateMatches.length === 1 && candidateMatches[0] === element) {
+            return candidate;
+          }
+        } catch {
+          /* keep the ambiguous-but-valid original */
+        }
+      }
+    }
+    console.warn(`Selector matches ${matches.length} elements at record time:`, cssSelector);
+  }
+
+  return cssSelector;
+}
+
+// Resolve a click to the nearest interactive element. Users click the <span>
+// inside a button or a shadow-DOM leaf; recording that leaf produces brittle
+// selectors and meaningless target text. composedPath() sees through shadow
+// roots (event.target is retargeted at the shadow boundary).
+const INTERACTIVE_SELECTOR =
+  'a,button,input,select,textarea,label,summary,[role="button"],[role="link"],[role="menuitem"],[role="option"],[role="radio"],[role="checkbox"],[role="tab"],[onclick]';
+
+function resolveInteractiveTarget(event: MouseEvent): HTMLElement | null {
+  const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+  const primary = (path[0] instanceof HTMLElement ? path[0] : event.target) as HTMLElement | null;
+  if (!primary) return null;
+  for (const node of path) {
+    if (node instanceof HTMLElement && node.matches(INTERACTIVE_SELECTOR)) {
+      return node;
+    }
+    if (node === document.body) break; // don't climb past the document body
+  }
+  return primary.closest?.(INTERACTIVE_SELECTOR) ?? primary;
+}
+
+// Client-side twin of the Python SelectorGenerator: emit semantic strategies
+// at record time so replay's multi-strategy finder has real material to work
+// with (previously selectorStrategies could only come from LLM generation).
+function generateSelectorStrategies(
+  element: HTMLElement,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  semanticInfo: Record<string, any>
+): Array<{ type: string; value: string; priority: number; metadata: Record<string, unknown> }> {
+  const strategies: Array<{ type: string; value: string; priority: number; metadata: Record<string, unknown> }> = [];
+  const tag = element.tagName.toLowerCase();
+  const text = String(semanticInfo.textContent || "").trim();
+  const implicitRoles: Record<string, string> = {
+    a: "link",
+    button: "button",
+    select: "combobox",
+    textarea: "textbox",
+    input: "textbox",
+  };
+
+  if (text && text.length <= 100) {
+    strategies.push({ type: "text_exact", value: text, priority: 1, metadata: { tag } });
+    const role = element.getAttribute("role") || implicitRoles[tag];
+    if (role) {
+      strategies.push({ type: "role_text", value: text, priority: 2, metadata: { role, tag } });
+    }
+  }
+  if (semanticInfo.ariaLabel) {
+    strategies.push({ type: "aria_label", value: String(semanticInfo.ariaLabel), priority: 3, metadata: { tag } });
+  }
+  if (semanticInfo.placeholder) {
+    strategies.push({ type: "placeholder", value: String(semanticInfo.placeholder), priority: 4, metadata: { tag } });
+  }
+  if (element.title) {
+    strategies.push({ type: "title", value: element.title, priority: 5, metadata: { tag } });
+  }
+  const alt = element.getAttribute("alt");
+  if (alt) {
+    strategies.push({ type: "alt_text", value: alt, priority: 6, metadata: { tag } });
+  }
+  if (text && text.length > 3 && text.length <= 100) {
+    strategies.push({ type: "text_fuzzy", value: text, priority: 7, metadata: { threshold: 0.8, tag } });
+  }
+  return strategies;
 }
 
 function startRecorder() {
@@ -596,7 +703,9 @@ function extractSemanticInfo(element: HTMLElement) {
 // --- Custom Click Handler ---
 function handleCustomClick(event: MouseEvent) {
   if (!isRecordingActive) return;
-  const targetElement = event.target as HTMLElement;
+  // Nearest interactive ancestor (composedPath-aware): clicking the <span>
+  // inside a button records the BUTTON, not the span.
+  const targetElement = resolveInteractiveTarget(event);
   if (!targetElement) return;
 
   try {
@@ -671,6 +780,8 @@ function handleCustomClick(event: MouseEvent) {
       // Semantic information for target_text based workflows
       targetText: targetText,
       semanticInfo: semanticInfo,
+      // Multi-strategy semantic selectors for the replay-side element finder
+      selectorStrategies: generateSelectorStrategies(targetElement, semanticInfo),
       // Enhanced radio button information
       radioButtonInfo: semanticInfo.radioButtonInfo,
     };
@@ -802,6 +913,8 @@ function handleInput(event: Event) {
       // Semantic information for target_text based workflows
       targetText: targetText,
       semanticInfo: semanticInfo,
+      // Multi-strategy semantic selectors for the replay-side element finder
+      selectorStrategies: generateSelectorStrategies(targetElement as HTMLElement, semanticInfo),
     };
     console.log("Sending CUSTOM_INPUT_EVENT");
     chrome.runtime.sendMessage({

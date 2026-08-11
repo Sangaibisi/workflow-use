@@ -1,3 +1,5 @@
+import { SelectorStrategy } from "./workflow-types";
+
 export interface StoredCustomClickEvent {
   timestamp: number;
   url: string;
@@ -7,6 +9,7 @@ export interface StoredCustomClickEvent {
   elementTag: string;
   elementText: string;
   targetText?: string; // Semantic targeting text
+  selectorStrategies?: SelectorStrategy[]; // Multi-strategy semantic selectors
   tabId: number;
   messageType: "CUSTOM_CLICK_EVENT";
   screenshot?: string;
@@ -21,6 +24,7 @@ export interface StoredCustomInputEvent {
   elementTag: string;
   value: string;
   targetText?: string; // Semantic targeting text
+  selectorStrategies?: SelectorStrategy[]; // Multi-strategy semantic selectors
   tabId: number;
   messageType: "CUSTOM_INPUT_EVENT";
   screenshot?: string;
@@ -38,6 +42,7 @@ export interface StoredCustomSelectEvent {
   fieldName?: string; // Field name/label from semantic info
   allOptions?: Array<{ text: string; value: string }>; // All options of the select
   targetText?: string; // Semantic targeting text
+  selectorStrategies?: SelectorStrategy[]; // Multi-strategy semantic selectors
   tabId: number;
   messageType: "CUSTOM_SELECT_EVENT";
   screenshot?: string;

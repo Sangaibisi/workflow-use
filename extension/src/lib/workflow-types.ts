@@ -9,6 +9,15 @@ export interface Workflow {
   input_schema: [];
 }
 
+// Semantic selector strategy captured at record time (consumed by the
+// replay-side multi-strategy element finder)
+export interface SelectorStrategy {
+  type: string; // text_exact | role_text | aria_label | placeholder | title | alt_text | text_fuzzy
+  value: string;
+  priority: number;
+  metadata: Record<string, unknown>;
+}
+
 // Radio button specific information
 export interface RadioButtonInfo {
   fieldName: string; // The group/field name (e.g., "Marital Status")
@@ -50,6 +59,7 @@ export interface ClickStep extends BaseStep {
   elementTag: string;
   elementText: string;
   targetText?: string; // Semantic targeting text (label, placeholder, aria-label, etc.)
+  selectorStrategies?: SelectorStrategy[]; // Multi-strategy semantic selectors
   radioButtonInfo?: RadioButtonInfo; // Enhanced radio button information
   screenshot?: string; // Optional in source
 }
@@ -63,6 +73,7 @@ export interface InputStep extends BaseStep {
   elementTag: string;
   value: string;
   targetText?: string; // Semantic targeting text (label, placeholder, aria-label, etc.)
+  selectorStrategies?: SelectorStrategy[]; // Multi-strategy semantic selectors
   screenshot?: string; // Optional in source
 }
 
