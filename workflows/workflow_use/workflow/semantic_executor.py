@@ -31,6 +31,17 @@ from workflow_use.workflow.step_verifier import StepVerifier, VerificationResult
 logger = logging.getLogger(__name__)
 
 
+class _ExtractGoalAdapter:
+	"""Expose a PageExtractionStep (``goal``) with the ExtractStep field names."""
+
+	def __init__(self, step):
+		self._step = step
+		self.extractionGoal = getattr(step, 'goal', None) or getattr(step, 'extractionGoal', '')
+
+	def __getattr__(self, name):
+		return getattr(self._step, name)
+
+
 class SemanticWorkflowExecutor:
 	"""Executes workflow steps using semantic mappings with optional AI extraction."""
 
@@ -371,23 +382,35 @@ class SemanticWorkflowExecutor:
 
 		matching_elements = []
 
-		# Priority 1: Exact text match in semantic mapping (highest priority)
-		# This handles cases where the exact dynamic value was captured
-		logger.debug('[Priority 1] Searching for exact text matches')
+		# When a container_hint is given, Priority 1/2 must stay within it - otherwise
+		# a stray price/year id-like token elsewhere on the page gets swept in.
+		container_hint_l = (container_hint or '').strip().lower()
+
+		def _in_container_hint(annotated_text: str) -> bool:
+			if not container_hint_l:
+				return True
+			context = annotated_text.split(' (in ')[1].rstrip(')').lower() if ' (in ' in annotated_text else ''
+			return container_hint_l in context
+
+		# Priority 1: dynamic ID/code tokens related to the requested pattern.
+		# Bare numeric tokens (\d{3,}) also match years/prices/quantities, so they
+		# only qualify as identifiers when they carry a code shape OR sit in the
+		# requested container - not on their own in arbitrary body text.
+		logger.debug('[Priority 1] Searching for ID/code text matches')
 		for text, element_info in self.current_mapping.items():
+			if not _in_container_hint(text):
+				continue
 			text_stripped = text.split(' (in ')[0].strip()  # Remove context annotations
 
-			# Check if text matches common ID/code patterns
-			if (
-				alphanumeric_id_pattern.match(text_stripped)
-				or numeric_id_pattern.match(text_stripped)
-				or code_pattern.match(text_stripped)
-			):
+			is_code_shaped = bool(alphanumeric_id_pattern.match(text_stripped) or code_pattern.match(text_stripped))
+			is_bare_numeric = bool(numeric_id_pattern.match(text_stripped))
+
+			if is_code_shaped or (is_bare_numeric and container_hint_l):
 				matching_elements.append((text, element_info, 1))
 				logger.debug(f'[Priority 1] Found ID/code pattern: {text_stripped}')
 
 		if matching_elements:
-			logger.info(f'✅ Found {len(matching_elements)} exact ID/code matches (Priority 1)')
+			logger.info(f'✅ Found {len(matching_elements)} ID/code matches (Priority 1)')
 			return self._select_element_by_position(matching_elements, position_hint, container_hint)
 
 		# Priority 2: Clickable elements in structured containers (tables, lists) with ID-like patterns
@@ -672,38 +695,27 @@ class SemanticWorkflowExecutor:
 			selectors_to_try.extend(fallback_selectors)
 
 		page = await self.browser.get_current_page()
-		end_time = asyncio.get_event_loop().time() + (timeout_ms / 1000)
+		# Split the budget across the CSS selectors to try. A single shared
+		# deadline meant the primary selector consumed the whole timeout and every
+		# fallback was checked exactly once (or not at all) - defeating fallbacks.
+		css_selectors = [s for s in selectors_to_try if not s.startswith('xpath=')]
+		if not css_selectors:
+			logger.warning(f'No CSS-queryable selector to wait for (got {selectors_to_try})')
+			return False, selector
+		per_selector_ms = max(timeout_ms / len(css_selectors), 200)
 
-		for sel in selectors_to_try:
-			try:
-				# XPath selectors need special handling - skip for now in CDP
-				if sel.startswith('xpath='):
-					logger.debug(f'XPath selector not supported in CDP: {sel}')
-					continue
-
-				# Poll for element with timeout
-				while asyncio.get_event_loop().time() < end_time:
-					try:
-						elements = await page.get_elements_by_css_selector(sel)
-
-						if len(elements) > 0:
-							if len(elements) > 1:
-								logger.warning(f'Selector {sel} matches {len(elements)} elements during wait')
-								# Try to make it more specific if it's the hierarchical selector
-								if sel != selector and ':nth-of-type' in sel:
-									return True, sel  # Hierarchical selectors with nth-of-type are usually fine
-								return True, sel  # Element exists, but we'll handle the strict mode later
-
-							return True, sel
-					except Exception as e:
-						logger.debug(f'Error checking selector {sel}: {e}')
-
-					# Wait a bit before retrying
-					await asyncio.sleep(0.1)
-
-			except Exception as e:
-				logger.debug(f'Element not found with selector {sel}: {e}')
-				continue
+		for sel in css_selectors:
+			deadline = asyncio.get_event_loop().time() + (per_selector_ms / 1000)
+			while asyncio.get_event_loop().time() < deadline:
+				try:
+					elements = await page.get_elements_by_css_selector(sel)
+					if len(elements) > 0:
+						if len(elements) > 1:
+							logger.warning(f'Selector {sel} matches {len(elements)} elements during wait')
+						return True, sel
+				except Exception as e:
+					logger.debug(f'Error checking selector {sel}: {e}')
+				await asyncio.sleep(0.1)
 
 		logger.warning(f'Element not found with any selector: {selectors_to_try}')
 		return False, selector
@@ -712,9 +724,14 @@ class SemanticWorkflowExecutor:
 		"""Execute navigation step."""
 		page = await self.browser.get_current_page()
 
-		# Skip navigation if we're already at (or were redirected to) the target URL
+		# Skip navigation only when already at the target AND the fragment matches -
+		# hash routing (SPA #/route) is a real navigation the equivalence check
+		# (which strips fragments) would otherwise treat as a no-op.
 		current_url = await page.get_url()
-		if self._urls_equivalent(current_url, step.url):
+		from urllib.parse import urlparse
+
+		same_fragment = urlparse(current_url).fragment == urlparse(step.url).fragment
+		if same_fragment and self._urls_equivalent(current_url, step.url):
 			msg = f'⏭️ Skipped navigation - already at URL: {step.url}'
 			logger.info(msg)
 			# Still refresh semantic mapping even if we don't navigate, in case page state has changed
@@ -1919,6 +1936,10 @@ class SemanticWorkflowExecutor:
 			return await self.execute_button_step(step)
 		elif isinstance(step, ExtractStep):
 			return await self.execute_extract_step(step)
+		elif getattr(step, 'type', None) == 'extract_page_content':
+			# PageExtractionStep uses 'goal'; execute_extract_step reads
+			# 'extractionGoal'. Adapt so run_with_no_ai doesn't crash on it.
+			return await self.execute_extract_step(_ExtractGoalAdapter(step))
 		elif step.type == 'go_back':
 			return await self.execute_go_back_step(step)
 		elif step.type == 'go_forward':
@@ -2129,10 +2150,12 @@ class SemanticWorkflowExecutor:
 		self.global_failure_count += 1
 		self.consecutive_failures += 1
 
-		# Determine failure type and error category
+		# Determine failure type and error category.
+		# NOTE: consecutive_verification_failures is already incremented on the
+		# final-attempt verification-failure path above; do NOT bump it again
+		# here or the abort threshold is hit at 2 instead of the configured max.
 		error_category = ErrorCategory.UNKNOWN
 		if last_exception and 'verification failed' in str(last_exception).lower():
-			self.consecutive_verification_failures += 1
 			error_category = ErrorCategory.VERIFICATION_FAILED
 		elif last_exception and 'validation errors' in str(last_exception).lower():
 			error_category = ErrorCategory.VALIDATION_ERROR
@@ -2505,10 +2528,11 @@ class SemanticWorkflowExecutor:
 					return False
 
 			# For buttons, verify the click had some effect
+			# (target_text is None for cssSelector-only click steps - guard it)
 			elif (
 				step_type == 'button'
 				or 'button' in selector.lower()
-				or any(keyword in target_text.lower() for keyword in ['submit', 'next', 'continue', 'save', 'finish'])
+				or (target_text and any(k in target_text.lower() for k in ['submit', 'next', 'continue', 'save', 'finish']))
 			):
 				# Wait a bit for any page changes
 				await asyncio.sleep(1)
@@ -2535,7 +2559,11 @@ class SemanticWorkflowExecutor:
 						# Try to find the button by its text using semantic mapping
 						element_info = self._find_element_by_text(target_text)
 						if element_info and element_info.get('selectors'):
-							for sel in element_info['selectors']:
+							# 'selectors' is a single selector string, not a list - iterating
+							# it directly walked character-by-character.
+							mapped = element_info['selectors']
+							candidate_selectors = mapped if isinstance(mapped, list) else [mapped]
+							for sel in candidate_selectors:
 								if not sel.startswith('xpath='):
 									elements = await self._get_elements_by_selector(sel)
 									if elements:
@@ -2596,6 +2624,37 @@ class SemanticWorkflowExecutor:
 			logger.warning(f'Click verification failed: {e}')
 			return False
 
+	@staticmethod
+	def _input_values_match(expected: str, actual: str) -> bool:
+		"""Compare a recorded input value against the field's actual value.
+
+		Strict strip-equality rejected masked values (the field shows '' or '••••'
+		vs the recorded '********'), input-mask reformatting (phone '(555) 123'
+		vs '5551234'), and NBSP/curly-quote/whitespace differences - making every
+		such input 'fail' and get re-filled up to 3 times. This tolerates those.
+		"""
+		exp, act = (expected or ''), (actual or '')
+		if exp.strip() == act.strip():
+			return True
+		# A masked recorded value can't be read back verbatim; a non-empty field is success
+		if set(exp.strip()) <= {'*', '•', '·', '●'} and act.strip():
+			return True
+
+		def _canon(s: str) -> str:
+			import unicodedata
+
+			s = unicodedata.normalize('NFKC', s).replace('\xa0', ' ')
+			for a, b in (('“', '"'), ('”', '"'), ('‘', "'"), ('’', "'")):
+				s = s.replace(a, b)
+			return ' '.join(s.split()).casefold()
+
+		if _canon(exp) == _canon(act):
+			return True
+		# Formatted inputs (masks): compare the significant characters only
+		exp_alnum = ''.join(ch for ch in exp if ch.isalnum())
+		act_alnum = ''.join(ch for ch in act if ch.isalnum())
+		return bool(exp_alnum) and exp_alnum == act_alnum
+
 	async def _verify_input_action(self, selector: str, expected_value: str, input_type: str = 'text') -> bool:
 		"""Verify that an input action succeeded by checking the element's value."""
 		try:
@@ -2645,7 +2704,7 @@ class SemanticWorkflowExecutor:
 				# For text inputs and other input types
 				else:
 					actual_value = await self._element_input_value(element)
-					matches = actual_value.strip() == expected_value.strip()
+					matches = self._input_values_match(expected_value, actual_value)
 					logger.info(f"Verification: Input expected '{expected_value}', got '{actual_value}', match: {matches}")
 					return matches
 			else:
@@ -2696,7 +2755,7 @@ class SemanticWorkflowExecutor:
 
 				msg = f'🤖 Basic extraction: {step.extractionGoal}'
 				logger.info(msg)
-				return ActionResult(extracted_content=msg, include_in_memory=True, extracted_data=extracted_data)
+				return ActionResult(extracted_content=json.dumps(extracted_data), include_in_memory=True)
 
 			# AI-powered extraction using LLM
 			import markdownify
@@ -2778,7 +2837,7 @@ EXTRACTED INFORMATION:"""
 				content_preview = extracted_content  # [:200] + "..." if len(extracted_content) > 200 else extracted_content
 				logger.info(f'📋 Extracted content preview: {content_preview}')
 
-				return ActionResult(extracted_content=msg, include_in_memory=True, extracted_data=extracted_data)
+				return ActionResult(extracted_content=json.dumps(extracted_data), include_in_memory=True)
 
 			except Exception as llm_error:
 				logger.error(f'LLM extraction failed: {llm_error}')
@@ -2795,7 +2854,7 @@ EXTRACTED INFORMATION:"""
 				msg = f'🤖 Extraction Goal: {step.extractionGoal}\n\nLLM extraction failed, providing raw content:\n{fallback_data["raw_content"]}'
 				logger.warning(f'⚠️ LLM extraction failed, using fallback for: {step.extractionGoal}')
 
-				return ActionResult(extracted_content=msg, include_in_memory=True, extracted_data=fallback_data)
+				return ActionResult(extracted_content=json.dumps(fallback_data), include_in_memory=True)
 
 		except Exception as e:
 			logger.error(f'Failed to execute extraction step: {e}')
@@ -2807,9 +2866,8 @@ EXTRACTED INFORMATION:"""
 			}
 
 			return ActionResult(
-				extracted_content=f'❌ Extraction failed: {step.extractionGoal}\nError: {str(e)}',
+				extracted_content=json.dumps(error_data),
 				include_in_memory=True,
-				extracted_data=error_data,
 			)
 
 	async def find_element_with_context(self, target_text: str, context_hints: List[str] = None) -> Optional[Dict]:

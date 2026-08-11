@@ -119,7 +119,9 @@ class Workflow:
 		use_cloud: bool = False,
 		debug: bool = False,
 		debug_log_folder: str | Path | None = None,
-		step_wait_time: float = 0.1,
+		# None (not 0.1) so the workflow file's default_wait_time is honored;
+		# a hardcoded 0.1 here silently overrode it on every file load.
+		step_wait_time: float | None = None,
 	) -> Workflow:
 		"""Load a workflow from a file."""
 		with open(file_path, 'r', encoding='utf-8') as f:
@@ -825,11 +827,10 @@ Extracted Information:"""
 			result = await self._execute_step(step_index, step_resolved)
 			# Persist outputs (if declared) for future steps
 			self._store_output(step_resolved, result)
-			await asyncio.sleep(5)  # Keep browser open for 5 seconds
-		# Each invocation opens a new browser context – we close the browser to
-		# release resources right away.  This keeps the single-step API
-		# self-contained.
-		# await self.browser.close() # <-- Commented out for testing
+		# (Removed a fixed 5s sleep that delayed every single-step call for no
+		# reason.) The browser is created with keep_alive=True so the context
+		# manager above does not tear it down between steps; callers own the
+		# lifecycle and should close it when finished with the workflow.
 		return result
 
 	async def _capture_debug_screenshot(self, step_index: int, step_description: str, prefix: str = '') -> None:
