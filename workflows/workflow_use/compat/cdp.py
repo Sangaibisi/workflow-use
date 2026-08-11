@@ -190,6 +190,25 @@ async def wait_for_load_state(page: 'Page', state: str = 'load', timeout_ms: flo
 		await asyncio.sleep(DEFAULT_POLL_INTERVAL_S)
 
 
+async def wait_for_url_change(page: 'Page', old_url: str, timeout_ms: float = 3000) -> 'str | None':
+	"""Wait until the page URL differs from *old_url*.
+
+	Returns the new URL, or None on timeout (no navigation happened). Replaces
+	fixed post-click sleeps: returns as soon as navigation is observable.
+	"""
+	deadline = asyncio.get_event_loop().time() + max(timeout_ms, 0) / 1000
+	while True:
+		try:
+			current = await page.get_url()
+		except Exception:
+			current = None  # mid-navigation; keep polling
+		if current and current != old_url:
+			return current
+		if asyncio.get_event_loop().time() >= deadline:
+			return None
+		await asyncio.sleep(DEFAULT_POLL_INTERVAL_S)
+
+
 async def screenshot_to_file(page: 'Page', path: str, format: str = 'png') -> None:
 	"""Playwright ``screenshot(path=...)`` equivalent: decode base64 and write."""
 	data = await page.screenshot(format=format)

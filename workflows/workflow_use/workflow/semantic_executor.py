@@ -701,8 +701,10 @@ class SemanticWorkflowExecutor:
 		async def navigation_executor():
 			await page.goto(step.url)
 
-			# Wait for page to load and dynamic content (SPAs, etc.)
-			await asyncio.sleep(3)
+			# Wait for the document to actually load instead of a fixed 3s sleep
+			# (returns as soon as readyState is complete; SPAs settle below)
+			await cdp.wait_for_load_state(page, 'load', timeout_ms=10000)
+			await asyncio.sleep(0.3)
 
 			# Wait for common form elements to be present (indicates page is ready)
 			if (
@@ -1215,9 +1217,11 @@ class SemanticWorkflowExecutor:
 									await button_element.click()
 									logger.info(f'✅ Clicked submit button, waiting for navigation from {current_url}')
 
-									# Wait for navigation to complete (up to 5 seconds)
-									await asyncio.sleep(2)  # Give page time to start navigating
-									new_url = await page.get_url()
+									# Wait for navigation by watching the URL (returns as soon
+									# as it changes instead of a fixed 2s sleep)
+									new_url = (
+										await cdp.wait_for_url_change(page, current_url, timeout_ms=3000) or await page.get_url()
+									)
 
 									if new_url != current_url:
 										logger.info(f'✅ Navigation successful: {current_url} -> {new_url}')
