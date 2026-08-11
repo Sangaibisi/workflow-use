@@ -187,16 +187,19 @@ function startRecorder() {
           scrollTimeout = null;
           lastDirection = null; // Reset direction for next scroll
         }, DEBOUNCE_MS);
-      } else {
-        // Pass through non-scroll events unchanged
+      } else if (event.type === EventType.Meta) {
+        // Meta events carry the page URL; everything else rrweb produces
+        // (mutations, mousemove samples, full DOM snapshots) is never used by
+        // the step converter - forwarding it grew session logs by hundreds of
+        // MB and made every stored event trigger a full workflow rebuild.
         chrome.runtime.sendMessage({ type: "RRWEB_EVENT", payload: event });
       }
     },
     maskInputOptions: {
       password: true,
     },
-    checkoutEveryNms: 10000,
-    checkoutEveryNth: 200,
+    // No periodic checkouts: forced full snapshots were pure dead weight for
+    // step conversion (only Scroll + Meta events are consumed).
   });
 
   // Add the stop function to window for potential manual cleanup

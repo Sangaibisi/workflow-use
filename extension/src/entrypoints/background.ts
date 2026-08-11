@@ -6,6 +6,7 @@ import {
   StoredCustomKeyEvent,
   StoredCustomSelectEvent,
   StoredEvent,
+  StoredNavigationEvent,
   StoredRrwebEvent,
   StoredExtractionEvent,
 } from "../lib/types";
@@ -209,24 +210,16 @@ export default defineBackground(() => {
         description: generateStepDescription(step),
       };
 
-      // Remove internal fields that shouldn't be in the final workflow
-      delete semanticStep.timestamp;
-      delete semanticStep.tabId;
-      delete semanticStep.frameUrl;
-      delete semanticStep.xpath;
-      delete semanticStep.elementTag;
-      delete semanticStep.elementText;
-      delete semanticStep.screenshot;
+      // Keep capture context (timestamp/tabId/frameUrl/xpath/elementTag/
+      // elementText/screenshot) THROUGH the wire: the replay engine uses
+      // xpath/elementTag/elementText as selector fallbacks, the CLI dedups
+      // clicks by timestamp, and the builder consumes screenshots for vision.
+      // The server strips presentation-only fields at save time instead.
 
       // Handle different step types specifically
       if (step.type === "scroll") {
         delete semanticStep.targetId;
         // Keep scrollX and scrollY for scroll steps
-      } else if (step.type === "extract") {
-        // For extraction steps, preserve extractionGoal and url
-        // Keep: extractionGoal, url, type, description
-        // Already removed: timestamp, tabId, screenshot (these are correct to remove)
-        console.log(`🤖 Processing extraction step:`, semanticStep);
       }
 
       // Convert targetText to target_text for semantic workflow compatibility
@@ -318,6 +311,77 @@ export default defineBackground(() => {
       });
   }
 
+  // --- Debounced workflow rebuild ---------------------------------------------------
+  // Rebuilding + hashing + POSTing the whole workflow after EVERY stored event was
+  // O(n^2) over the recording; a trailing debounce batches event bursts.
+  let broadcastTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function scheduleWorkflowBroadcast() {
+    if (broadcastTimer !== null) return;
+    broadcastTimer = setTimeout(() => {
+      broadcastTimer = null;
+      broadcastWorkflowDataUpdate();
+    }, 250);
+  }
+
+  // --- Navigation capture (chrome.webNavigation) ------------------------------------
+  // Replaces the old rrweb-Meta heuristic, which couldn't tell deliberate
+  // navigations apart from click side-effects and therefore dropped EVERY
+  // navigation after the first interaction (address bar, bookmarks,
+  // back/forward, multi-site jumps).
+  const DELIBERATE_TRANSITIONS = new Set([
+    "typed",
+    "auto_bookmark",
+    "generated",
+    "keyword",
+    "keyword_generated",
+    "reload",
+  ]);
+
+  function handleCommittedNavigation(
+    details: chrome.webNavigation.WebNavigationTransitionCallbackDetails
+  ) {
+    if (details.frameId !== 0) return; // main frame only
+    if (!details.url || !/^https?:/i.test(details.url)) return;
+    stateRehydrated.then(() => {
+      if (!isRecordingEnabled) return;
+      const tabId = details.tabId;
+      const log = sessionLogs[tabId] ?? (sessionLogs[tabId] = []);
+      const qualifiers = details.transitionQualifiers ?? [];
+      const deliberate =
+        DELIBERATE_TRANSITIONS.has(details.transitionType ?? "") ||
+        qualifiers.includes("from_address_bar") ||
+        qualifiers.includes("forward_back");
+      // link/form_submit navigations are consequences of a recorded click -
+      // replay re-triggers them, so storing them would duplicate the action.
+      // The FIRST navigation of a tab always anchors the workflow though.
+      if (log.length > 0 && !deliberate) return;
+      // Dedupe SPA double-fires (onCommitted + onHistoryStateUpdated)
+      const last = log[log.length - 1];
+      if (
+        last &&
+        last.messageType === "NAVIGATION_EVENT" &&
+        (last as StoredNavigationEvent).url === details.url
+      ) {
+        return;
+      }
+      const navEvent: StoredNavigationEvent = {
+        messageType: "NAVIGATION_EVENT",
+        timestamp: details.timeStamp || Date.now(),
+        tabId,
+        url: details.url,
+        transitionType: details.transitionType ?? "",
+        transitionQualifiers: [...qualifiers],
+      };
+      log.push(navEvent);
+      persistRecordingStateSoon();
+      scheduleWorkflowBroadcast();
+    });
+  }
+
+  chrome.webNavigation.onCommitted.addListener(handleCommittedNavigation);
+  chrome.webNavigation.onHistoryStateUpdated.addListener(handleCommittedNavigation);
+
   // --- Tab Event Listeners ---
 
   // Function to send tab events (only if recording is enabled)
@@ -336,7 +400,7 @@ export default defineBackground(() => {
         tabId: tabId,
         ...payload,
       } as StoredEvent);
-      broadcastWorkflowDataUpdate(); // Call is async, will not block
+      scheduleWorkflowBroadcast(); // debounced full rebuild
     } else {
       console.warn(
         "Tab event received without tabId in payload:",
@@ -579,14 +643,20 @@ export default defineBackground(() => {
               };
               steps.push(newStep);
             }
-          } else if ((rrEvent.type === EventType.Meta || rrEvent.type === EventType.FullSnapshot) && rrEvent.data?.href) {
-            // Handle rrweb meta and fullsnapshot events as navigation (filtering now happens at storage level)
-            const metaData = rrEvent.data as { href: string };
+          }
+          // (Navigation no longer derives from rrweb Meta/FullSnapshot - see
+          // the NAVIGATION_EVENT case fed by chrome.webNavigation.)
+          break;
+        }
+
+        case "NAVIGATION_EVENT": {
+          const navEvent = event as StoredNavigationEvent;
+          if (navEvent.url) {
             const step: NavigationStep = {
               type: "navigation",
-              timestamp: rrEvent.timestamp,
-              tabId: rrEvent.tabId,
-              url: metaData.href,
+              timestamp: navEvent.timestamp,
+              tabId: navEvent.tabId,
+              url: navEvent.url,
             };
             steps.push(step);
           }
@@ -712,35 +782,21 @@ export default defineBackground(() => {
           tabInfo[tabId].title = sender.tab.title;
         }
 
-        // Track user interactions for navigation filtering
+        // Track user interactions (kept for potential heuristics/telemetry)
         if (customEventTypes.includes(message.type)) {
           recentUserInteractions[tabId] = eventPayload.timestamp || Date.now();
-          console.log(`[NAV_FILTER] Tracked ${message.type} on tab ${tabId} at ${recentUserInteractions[tabId]}`);
         }
 
-        // Log all rrweb events for debugging
-        if (message.type === "RRWEB_EVENT") {
-          console.log(`[NAV_FILTER] RRWEB event type ${eventPayload.type} (Meta=${EventType.Meta})`, eventPayload.data);
-        }
-
-        // Filter out side-effect navigation from rrweb meta and fullsnapshot events
-        if (message.type === "RRWEB_EVENT" && 
-            (eventPayload.type === EventType.Meta || eventPayload.type === EventType.FullSnapshot) && 
-            eventPayload.data?.href) {
-          const lastUserInteraction = recentUserInteractions[tabId] || 0;
-          const currentTime = eventPayload.timestamp || Date.now();
-          const timeSinceLastInteraction = currentTime - lastUserInteraction;
-          
-          // Check if this is the first event in the session (initial page load)
-          const isFirstEvent = !sessionLogs[tabId] || sessionLogs[tabId].length === 0;
-          
-          // Only store navigation if it's the first event (initial page load) or no user interaction has happened
-          if (lastUserInteraction === 0 || isFirstEvent) {
-            console.log(`[NAV_FILTER] STORING navigation: ${eventPayload.data.href} (lastInteraction: ${lastUserInteraction}, isFirst: ${isFirstEvent})`);
-          } else {
-            console.log(`[NAV_FILTER] FILTERED navigation: ${eventPayload.data.href} (${timeSinceLastInteraction}ms after interaction - always filter post-interaction navigation)`);
-            return; // Don't store this event
+        // Navigations are captured via chrome.webNavigation (typed intent);
+        // rrweb Meta events only serve scroll-step URLs through tabInfo.
+        if (
+          message.type === "RRWEB_EVENT" &&
+          (eventPayload.type === EventType.Meta || eventPayload.type === EventType.FullSnapshot)
+        ) {
+          if (eventPayload.data?.href) {
+            tabInfo[tabId].url = eventPayload.data.href;
           }
+          return; // not stored as a step source anymore
         }
 
         const eventWithMeta: StoredEvent = {
@@ -751,7 +807,7 @@ export default defineBackground(() => {
         } as StoredEvent;
         sessionLogs[tabId].push(eventWithMeta);
         persistRecordingStateSoon(); // survive service-worker termination
-        broadcastWorkflowDataUpdate(); // Call is async, will not block
+        scheduleWorkflowBroadcast(); // debounced full rebuild
         // console.log(`Stored ${message.type} from tab ${tabId}`);
       };
 

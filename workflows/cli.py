@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 import subprocess
 import tempfile  # For temporary file handling
 import webbrowser
@@ -229,8 +228,10 @@ def _build_and_save_semantic_workflow_from_recording(
 	final_workflow_path = output_dir / workflow_output_name
 
 	try:
+		from workflow_use.recorder.semantic_converter import strip_presentation_fields
+
 		with open(final_workflow_path, 'w') as f:
-			json.dump(semantic_workflow, f, indent=2)
+			json.dump(strip_presentation_fields(semantic_workflow), f, indent=2)
 		typer.secho(
 			f'Final semantic workflow saved to: {typer.style(str(final_workflow_path.resolve()), fg=typer.colors.BRIGHT_GREEN, bold=True)}',
 			fg=typer.colors.GREEN,

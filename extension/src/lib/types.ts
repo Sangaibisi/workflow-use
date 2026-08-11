@@ -91,6 +91,18 @@ export interface StoredRrwebEvent {
   messageType: "RRWEB_EVENT";
 }
 
+// Main-frame navigation captured via chrome.webNavigation (typed intent -
+// unlike the old rrweb-Meta heuristic which couldn't tell deliberate
+// navigations from click side-effects).
+export interface StoredNavigationEvent {
+  timestamp: number;
+  tabId: number;
+  url: string;
+  transitionType: string; // 'typed' | 'link' | 'reload' | ...
+  transitionQualifiers: string[]; // e.g. ['from_address_bar', 'forward_back']
+  messageType: "NAVIGATION_EVENT";
+}
+
 export type StoredEvent =
   | StoredCustomClickEvent
   | StoredCustomInputEvent
@@ -98,6 +110,7 @@ export type StoredEvent =
   | StoredCustomKeyEvent
   | StoredTabEvent
   | StoredRrwebEvent
+  | StoredNavigationEvent
   | StoredExtractionEvent;
 
 // --- Data Structures ---

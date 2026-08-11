@@ -15,7 +15,8 @@ export default defineConfig({
   manifest: {
     // storage: recording state survives MV3 service-worker termination
     // alarms: keepalive while a recording is active
-    permissions: ["tabs", "sidePanel", "storage", "alarms"],
+    // webNavigation: typed navigation capture (address bar / back-forward / reload)
+    permissions: ["tabs", "sidePanel", "storage", "alarms", "webNavigation"],
     // <all_urls> is a match pattern and belongs in host_permissions ("tabs"
     // covers the API side); keeping it in permissions triggers a load warning.
     host_permissions: ["<all_urls>", "http://127.0.0.1/*"],

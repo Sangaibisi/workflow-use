@@ -10,7 +10,10 @@ from browser_use import Browser
 from browser_use.llm import ChatBrowserUse
 
 from workflow_use.controller.service import WorkflowController
-from workflow_use.recorder.semantic_converter import convert_recorded_workflow_to_semantic
+from workflow_use.recorder.semantic_converter import (
+	convert_recorded_workflow_to_semantic,
+	strip_presentation_fields,
+)
 from workflow_use.recorder.service import RecordingService
 from workflow_use.recorder.views import HttpRecordingStoppedEvent, RecordingStatusPayload
 from workflow_use.workflow.service import Workflow
@@ -69,7 +72,7 @@ class WorkflowService:
 		"""Cap remembered finished tasks so long-lived processes don't grow unboundedly."""
 		finished = [tid for tid, info in self.active_tasks.items() if info.status not in ('running', 'pending')]
 		excess = len(finished) - self.MAX_FINISHED_TASKS
-		for tid in finished[:max(0, excess)]:  # dict preserves insertion order → oldest first
+		for tid in finished[: max(0, excess)]:  # dict preserves insertion order → oldest first
 			self.active_tasks.pop(tid, None)
 
 	# ---------- Recording control ----------
@@ -99,14 +102,12 @@ class WorkflowService:
 				return
 
 			recording_data = captured.model_dump(mode='json')
-			semantic = convert_recorded_workflow_to_semantic(recording_data)
+			semantic = strip_presentation_fields(convert_recorded_workflow_to_semantic(recording_data))
 
 			filename = f'recorded-{time.strftime("%Y%m%d-%H%M%S")}.workflow.yaml'
 			output_path = self.tmp_dir / filename
 			output_path.write_text(json.dumps(semantic, indent=2))
-			self.recording_result = RecordingStatusResponse(
-				status='done', message='Recording saved', workflow_file=filename
-			)
+			self.recording_result = RecordingStatusResponse(status='done', message='Recording saved', workflow_file=filename)
 		except asyncio.CancelledError:
 			self.recording_result = RecordingStatusResponse(status='no_data', message='Recording cancelled')
 			raise

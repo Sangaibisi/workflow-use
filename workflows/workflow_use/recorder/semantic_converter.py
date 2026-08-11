@@ -278,6 +278,26 @@ class SemanticWorkflowConverter:
 			return workflow_data
 
 
+# Presentation-only capture context that should not land in saved workflow files.
+# NOTE: frameUrl/xpath/elementTag/elementText are NOT stripped - the replay
+# engine uses them as selector fallbacks.
+_PRESENTATION_FIELDS = ('screenshot', 'tabId', 'timestamp')
+
+
+def strip_presentation_fields(workflow_data: Dict[str, Any]) -> Dict[str, Any]:
+	"""Drop capture-context fields (screenshots, tab ids, timestamps) at save time.
+
+	The extension now keeps these THROUGH the wire (the builder consumes
+	screenshots, the CLI dedups clicks by timestamp); stripping happens here,
+	once, when the workflow is persisted.
+	"""
+	for step in workflow_data.get('steps', []) or []:
+		if isinstance(step, dict):
+			for field in _PRESENTATION_FIELDS:
+				step.pop(field, None)
+	return workflow_data
+
+
 def convert_recorded_workflow_to_semantic(workflow_data: Dict[str, Any]) -> Dict[str, Any]:
 	"""Convenience function to convert a recorded workflow to semantic targeting."""
 	converter = SemanticWorkflowConverter()
