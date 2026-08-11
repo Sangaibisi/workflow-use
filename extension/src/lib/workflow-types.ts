@@ -21,7 +21,7 @@ export type Step =
   | ClickStep
   | InputStep
   | RadioStep
-  | SelectStep
+  | SelectChangeStep
   | CheckboxStep
   | KeyPressStep
   | ScrollStep
@@ -98,16 +98,19 @@ export interface RadioStep extends BaseStep {
   screenshot?: string;
 }
 
-export interface SelectStep extends BaseStep {
-  type: "select";
+// Matches the replay schema's SelectChangeStep (workflows/workflow_use/schema/views.py):
+// type 'select_change' with the option's visible text in selectedText.
+export interface SelectChangeStep extends BaseStep {
+  type: "select_change";
   url: string;
   frameUrl: string;
   xpath: string;
   cssSelector?: string;
-  fieldName: string; // The select field name/label
-  selectedOption: string; // The selected text
-  selectedValue: string; // The selected value
-  options: Array<{text: string, value: string}>; // All options
+  elementTag: string;
+  selectedText: string; // Visible text of the chosen option (drives replay)
+  selectedValue: string; // The option's value attribute
+  fieldName?: string; // The select field name/label
+  options?: Array<{ text: string; value: string }>; // All options (context for builder/LLM)
   targetText?: string;
   screenshot?: string;
 }

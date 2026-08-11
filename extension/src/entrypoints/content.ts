@@ -643,33 +643,71 @@ function handleCustomClick(event: MouseEvent) {
   }
 }
 
+// Clicking a <label> makes the browser dispatch a second, synthetic click on the
+// associated control; both reach the capture-phase listener and used to become two
+// ClickSteps (replay then toggles the checkbox straight back). Track the label's
+// control so the forwarded click can be recognized and skipped.
+let lastLabelClickControl: HTMLElement | null = null;
+let lastLabelClickTime = 0;
+const LABEL_FORWARD_WINDOW_MS = 500;
+
+function resolveLabelControl(element: HTMLElement): HTMLElement | null {
+  const label = element.closest("label");
+  if (!label) return null;
+  const htmlFor = label.getAttribute("for");
+  if (htmlFor) {
+    const control = document.getElementById(htmlFor);
+    if (control) return control as HTMLElement;
+  }
+  return label.querySelector("input, select, textarea, button");
+}
+
 // Helper function to determine if we should skip capturing this click event
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function shouldSkipClickEvent(element: HTMLElement, _semanticInfo: Record<string, any>, targetText: string): boolean {
   const tagName = element.tagName.toLowerCase();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const elementType = (element as any).type?.toLowerCase() || '';
-  
-  // Skip hidden input elements (they often fire alongside visible elements)
-  if (tagName === 'input' && elementType === 'radio' && !isElementVisible(element)) {
+  const isCheckable = elementType === 'radio' || elementType === 'checkbox';
+
+  // Skip the synthetic click the browser forwards to a control right after its
+  // <label> was clicked - the label click is already recorded.
+  if (
+    lastLabelClickControl === element &&
+    Date.now() - lastLabelClickTime < LABEL_FORWARD_WINDOW_MS
+  ) {
+    lastLabelClickControl = null;
     return true;
   }
-  
+
+  // Remember which control this label click will forward to
+  const labelControl = resolveLabelControl(element);
+  if (labelControl && labelControl !== element) {
+    lastLabelClickControl = labelControl;
+    lastLabelClickTime = Date.now();
+  }
+
+  // Skip hidden checkable inputs (they often fire alongside visible elements,
+  // e.g. visually-hidden inputs behind styled checkbox/radio widgets)
+  if (tagName === 'input' && isCheckable && !isElementVisible(element)) {
+    return true;
+  }
+
   // Skip button elements that have no meaningful text and are likely part of a composite component
-  if (tagName === 'button' && 
-      element.getAttribute('role') === 'radio' && 
+  if (tagName === 'button' &&
+      element.getAttribute('role') === 'radio' &&
       !targetText.trim()) {
     return true;
   }
-  
+
   // Skip clicks on elements that have no semantic value and are very generic
-  if (!targetText.trim() && 
-      tagName === 'input' && 
-      elementType === 'radio' &&
+  if (!targetText.trim() &&
+      tagName === 'input' &&
+      isCheckable &&
       element.style.display === 'none') {
     return true;
   }
-  
+
   return false;
 }
 
@@ -689,7 +727,12 @@ function handleInput(event: Event) {
   if (!isRecordingActive) return;
   const targetElement = event.target as HTMLInputElement | HTMLTextAreaElement;
   if (!targetElement || !("value" in targetElement)) return;
-  const isPassword = targetElement.type === "password";
+  const inputTypeAttr = (targetElement as HTMLInputElement).type?.toLowerCase() || "";
+  // Toggling a checkbox/radio fires an 'input' event whose value is the meaningless
+  // literal "on" - that interaction is captured by the click handler, and recording
+  // it here used to add a bogus InputStep that replay tried to type into the box.
+  if (inputTypeAttr === "checkbox" || inputTypeAttr === "radio") return;
+  const isPassword = inputTypeAttr === "password";
 
   try {
     const xpath = getXPath(targetElement);

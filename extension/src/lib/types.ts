@@ -35,6 +35,9 @@ export interface StoredCustomSelectEvent {
   elementTag: string;
   selectedValue: string;
   selectedText: string;
+  fieldName?: string; // Field name/label from semantic info
+  allOptions?: Array<{ text: string; value: string }>; // All options of the select
+  targetText?: string; // Semantic targeting text
   tabId: number;
   messageType: "CUSTOM_SELECT_EVENT";
   screenshot?: string;

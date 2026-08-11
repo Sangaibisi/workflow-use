@@ -4,6 +4,7 @@ import {
   StoredCustomClickEvent,
   StoredCustomInputEvent,
   StoredCustomKeyEvent,
+  StoredCustomSelectEvent,
   StoredEvent,
   StoredRrwebEvent,
   StoredExtractionEvent,
@@ -14,6 +15,7 @@ import {
   KeyPressStep,
   NavigationStep,
   ScrollStep,
+  SelectChangeStep,
   Step,
   Workflow,
   ExtractStep,
@@ -512,8 +514,48 @@ export default defineBackground(() => {
           break;
         }
 
+        case "CUSTOM_SELECT_EVENT": {
+          const selectEvent = event as StoredCustomSelectEvent;
+          if (selectEvent.url && (selectEvent.xpath || selectEvent.cssSelector)) {
+            // Consecutive changes on the same <select> collapse into the final choice
+            const lastStep = steps.length > 0 ? steps[steps.length - 1] : null;
+            if (
+              lastStep &&
+              lastStep.type === "select_change" &&
+              lastStep.tabId === selectEvent.tabId &&
+              (lastStep as SelectChangeStep).xpath === selectEvent.xpath
+            ) {
+              const mergeTarget = lastStep as SelectChangeStep;
+              mergeTarget.selectedText = selectEvent.selectedText;
+              mergeTarget.selectedValue = selectEvent.selectedValue;
+              mergeTarget.timestamp = selectEvent.timestamp;
+              mergeTarget.screenshot = selectEvent.screenshot ?? mergeTarget.screenshot;
+            } else {
+              const step: SelectChangeStep = {
+                type: "select_change",
+                timestamp: selectEvent.timestamp,
+                tabId: selectEvent.tabId,
+                url: selectEvent.url,
+                frameUrl: selectEvent.frameUrl,
+                xpath: selectEvent.xpath,
+                cssSelector: selectEvent.cssSelector,
+                elementTag: selectEvent.elementTag,
+                selectedText: selectEvent.selectedText,
+                selectedValue: selectEvent.selectedValue,
+                fieldName: selectEvent.fieldName,
+                options: selectEvent.allOptions,
+                targetText: selectEvent.targetText,
+                screenshot: selectEvent.screenshot,
+              };
+              steps.push(step);
+            }
+          } else {
+            console.warn("Skipping incomplete CUSTOM_SELECT_EVENT:", selectEvent);
+          }
+          break;
+        }
+
         // Add cases for other StoredEvent types to Step types if needed
-        // e.g., CUSTOM_SELECT_EVENT -> SelectStep
         // e.g., CUSTOM_TAB_CREATED -> TabCreatedStep
         // RRWEB_EVENT type 4 (Meta) or 3 (FullSnapshot) could potentially map to NavigationStep if needed.
 
