@@ -13,8 +13,12 @@ export default defineConfig({
       // WXT-specific overrides (optional)
     }),
   manifest: {
-    permissions: ["tabs", "sidePanel", "<all_urls>"],
-    host_permissions: ["http://127.0.0.1/*"],
+    // storage: recording state survives MV3 service-worker termination
+    // alarms: keepalive while a recording is active
+    permissions: ["tabs", "sidePanel", "storage", "alarms"],
+    // <all_urls> is a match pattern and belongs in host_permissions ("tabs"
+    // covers the API side); keeping it in permissions triggers a load warning.
+    host_permissions: ["<all_urls>", "http://127.0.0.1/*"],
     // options_page: "options.html",
     // action: {
     //   default_popup: "popup.html",

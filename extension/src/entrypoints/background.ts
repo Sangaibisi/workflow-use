@@ -42,6 +42,101 @@ export default defineBackground(() => {
 
   const PYTHON_SERVER_ENDPOINT = "http://127.0.0.1:7331/event";
 
+  // --- Recording-state persistence -------------------------------------------------
+  // MV3 terminates idle service workers after ~30s; with state only in memory, a
+  // pause mid-recording silently destroyed every prior step while recording
+  // appeared to continue. State is persisted to chrome.storage.session (cleared
+  // when the browser closes - matching a recording's natural lifetime) and
+  // rehydrated on service-worker startup. A chrome.alarms keepalive fires while
+  // recording so the idle gap between wakeups stays small.
+  const STORAGE_KEY = "wf_recording_state_v1";
+  const KEEPALIVE_ALARM = "wf-recording-keepalive";
+  let persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function persistRecordingStateSoon() {
+    if (persistTimer !== null) return; // a write is already queued
+    persistTimer = setTimeout(() => {
+      persistTimer = null;
+      // Screenshots are data URLs (100-400KB each) and would blow the 10MB
+      // storage.session quota; persist events without them so at worst the
+      // restored recording is missing screenshots, never steps.
+      const slimLogs: { [tabId: number]: StoredEvent[] } = {};
+      for (const [tabId, events] of Object.entries(sessionLogs)) {
+        slimLogs[parseInt(tabId, 10)] = events.map((event) =>
+          "screenshot" in event && event.screenshot
+            ? ({ ...event, screenshot: undefined } as StoredEvent)
+            : event
+        );
+      }
+      chrome.storage.session
+        .set({
+          [STORAGE_KEY]: {
+            sessionLogs: slimLogs,
+            tabInfo,
+            recentUserInteractions,
+            isRecordingEnabled,
+            lastWorkflowHash,
+          },
+        })
+        .catch((error) => console.warn("[Persist] Failed to save recording state:", error));
+    }, 300);
+  }
+
+  async function rehydrateRecordingState(): Promise<void> {
+    try {
+      const stored = await chrome.storage.session.get(STORAGE_KEY);
+      const state = stored?.[STORAGE_KEY];
+      if (!state) return;
+      // Prepend stored events so anything captured before rehydration survives
+      for (const [tabIdStr, events] of Object.entries(
+        (state.sessionLogs ?? {}) as { [tabId: string]: StoredEvent[] }
+      )) {
+        const tabId = parseInt(tabIdStr, 10);
+        sessionLogs[tabId] = [...events, ...(sessionLogs[tabId] ?? [])];
+      }
+      for (const [tabIdStr, info] of Object.entries(state.tabInfo ?? {})) {
+        const tabId = parseInt(tabIdStr, 10);
+        tabInfo[tabId] = { ...(info as { url?: string; title?: string }), ...tabInfo[tabId] };
+      }
+      Object.assign(recentUserInteractions, state.recentUserInteractions ?? {});
+      if (typeof state.isRecordingEnabled === "boolean") {
+        isRecordingEnabled = state.isRecordingEnabled;
+      }
+      if (typeof state.lastWorkflowHash === "string") {
+        lastWorkflowHash = state.lastWorkflowHash;
+      }
+      const eventCount = Object.values(sessionLogs).reduce((n, events) => n + events.length, 0);
+      if (eventCount > 0) {
+        console.log(
+          `[Persist] Restored recording state after service-worker restart (${eventCount} events, recording=${isRecordingEnabled})`
+        );
+      }
+      updateKeepaliveAlarm();
+    } catch (error) {
+      console.warn("[Persist] Failed to restore recording state:", error);
+    }
+  }
+
+  function updateKeepaliveAlarm() {
+    if (isRecordingEnabled) {
+      chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
+    } else {
+      chrome.alarms.clear(KEEPALIVE_ALARM).catch(() => undefined);
+    }
+  }
+
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === KEEPALIVE_ALARM) {
+      // Waking up IS the point; opportunistically flush state while we're alive.
+      persistRecordingStateSoon();
+    }
+  });
+
+  let rehydrationComplete = false;
+  const stateRehydrated: Promise<void> = rehydrateRecordingState().finally(() => {
+    rehydrationComplete = true;
+  });
+
   // Hashing function using SubtleCrypto (SHA-256)
   async function calculateSHA256(str: string): Promise<string> {
     const encoder = new TextEncoder();
@@ -585,7 +680,10 @@ export default defineBackground(() => {
       message.type === "RRWEB_EVENT" ||
       customEventTypes.includes(message.type)
     ) {
-      if (!isRecordingEnabled) {
+      // Right after a service-worker restart the in-memory flag may not reflect
+      // the persisted state yet; only trust it once rehydration finished. Events
+      // arriving in that window are stored (rehydration prepends older events).
+      if (rehydrationComplete && !isRecordingEnabled) {
         return false; // Don't process if disabled, not async
       }
       if (!sender.tab?.id) {
@@ -650,8 +748,22 @@ export default defineBackground(() => {
           screenshot: screenshotDataUrl,
         } as StoredEvent;
         sessionLogs[tabId].push(eventWithMeta);
+        persistRecordingStateSoon(); // survive service-worker termination
         broadcastWorkflowDataUpdate(); // Call is async, will not block
         // console.log(`Stored ${message.type} from tab ${tabId}`);
+      };
+
+      // During the rehydration window the recording flag isn't trustworthy yet;
+      // re-check it once restoration finished and drop the event if recording
+      // was actually off.
+      const storeEventChecked: typeof storeEvent = (eventPayload, screenshotDataUrl) => {
+        if (rehydrationComplete) {
+          if (isRecordingEnabled) storeEvent(eventPayload, screenshotDataUrl);
+          return;
+        }
+        stateRehydrated.then(() => {
+          if (isRecordingEnabled) storeEvent(eventPayload, screenshotDataUrl);
+        });
       };
 
       // If it's a custom event from content script, try capture screenshot
@@ -666,22 +778,22 @@ export default defineBackground(() => {
                 "Screenshot failed:",
                 chrome.runtime.lastError.message
               );
-              storeEvent(message.payload); // Store event without screenshot
+              storeEventChecked(message.payload); // Store event without screenshot
             } else {
-              storeEvent(message.payload, dataUrl); // Store event with screenshot
+              storeEventChecked(message.payload, dataUrl); // Store event with screenshot
             }
             // Note: sendResponse is not called here, as the event listener just stores data
           }
         );
       } else if (message.type === "RRWEB_EVENT") {
         // For RRWEB_EVENT, store immediately (synchronous)
-        storeEvent(message.payload);
+        storeEventChecked(message.payload);
       } else if (isCustomEvent) {
         // Custom event but couldn't get screenshot (e.g., missing windowId)
         console.warn(
           "Storing custom event without screenshot due to missing windowId or other issue."
         );
-        storeEvent(message.payload);
+        storeEventChecked(message.payload);
       }
     }
 
@@ -726,6 +838,8 @@ export default defineBackground(() => {
         };
         sendEventToServer(eventToSend);
       }
+      persistRecordingStateSoon(); // persist the cleared+started state
+      updateKeepaliveAlarm();
       sendResponse({ status: "started" }); // Send simple confirmation
     } else if (message.type === "STOP_RECORDING") {
       console.log("Received STOP_RECORDING request.");
@@ -742,6 +856,8 @@ export default defineBackground(() => {
         };
         sendEventToServer(eventToSend);
       }
+      persistRecordingStateSoon();
+      updateKeepaliveAlarm();
       sendResponse({ status: "stopped" }); // Send simple confirmation
     }
     // --- Add Extraction Step from Sidepanel ---
