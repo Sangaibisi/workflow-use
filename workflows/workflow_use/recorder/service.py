@@ -46,6 +46,7 @@ def _find_extension_capable_browser() -> str | None:
 		'chromium-*/chrome-linux/chrome',
 		'chromium-*/chrome-win/chrome.exe',
 	]
+
 	def _revision(path: pathlib.Path) -> int:
 		# .../ms-playwright/chromium-1234/... — lexicographic sort would rank
 		# chromium-999 above chromium-1017, so compare the revision numerically.
