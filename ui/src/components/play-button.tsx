@@ -105,7 +105,22 @@ export const PlayButton: React.FC<PlayButtonProps> = ({
         }
       );
 
+      // A 4xx/5xx (workflow renamed, backend restarted) used to leave
+      // isRunning stuck true with no task id: nothing rendered, the modal
+      // closed, and the Execute button stayed disabled until a full page
+      // reload - with no error message at all.
+      if (!response.ok) {
+        const detail = await response
+          .json()
+          .then((body) => body?.detail)
+          .catch(() => null);
+        throw new Error(detail || `Backend returned ${response.status}`);
+      }
+
       const data = await response.json();
+      if (!data.task_id) {
+        throw new Error(data.message || "Backend did not return a task id");
+      }
       setTaskId(data.task_id);
       setLogPosition(data.log_position);
       setIsRunning(true);
@@ -113,7 +128,12 @@ export const PlayButton: React.FC<PlayButtonProps> = ({
       setShowModal(false);
     } catch (err) {
       console.error("Failed to execute workflow:", err);
-      setError("An error occurred while executing the workflow");
+      setError(
+        err instanceof Error
+          ? err.message
+          : "An error occurred while executing the workflow"
+      );
+      setIsRunning(false); // keep Execute usable after a failed start
     }
   };
 

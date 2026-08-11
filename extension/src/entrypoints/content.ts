@@ -57,8 +57,9 @@ const SAFE_ATTRIBUTES = new Set([
   "readonly",
   "alt",
   "title",
-  "src",
-  "href",
+  // NOTE: src/href deliberately excluded - they often carry signed URLs,
+  // session tokens and tracking params, which both leaked into exported
+  // files and produced selectors that break on the next session.
   "target",
   // Add common data attributes if stable
   "data-id",
@@ -96,7 +97,10 @@ function getEnhancedCSSSelector(element: HTMLElement, xpath: string): string {
       if (attrValue === "") {
         cssSelector += `[${safeAttribute}]`;
       } else {
-        const safeValue = attrValue.replace(/"/g, '"');
+        // Escape embedded quotes for the attribute-selector string
+        // (the old `replace(/"/g, '"')` replaced quotes with themselves -
+        // a no-op that produced invalid selectors which throw at replay)
+        const safeValue = attrValue.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
         if (/["'<>`\s]/.test(attrValue)) {
           cssSelector += `[${safeAttribute}*="${safeValue}"]`;
         } else {
@@ -107,10 +111,7 @@ function getEnhancedCSSSelector(element: HTMLElement, xpath: string): string {
     return cssSelector;
   } catch (error) {
     console.error("Error generating enhanced CSS selector:", error);
-    return `${element.tagName.toLowerCase()}[xpath="${xpath.replace(
-      /"/g,
-      '"'
-    )}"]`;
+    return `${element.tagName.toLowerCase()}[xpath="${xpath.replace(/"/g, '\\"')}"]`;
   }
 }
 
@@ -866,21 +867,11 @@ function handleSelectChange(event: Event) {
 
 // --- Custom Keydown Handler ---
 // Set of keys we want to capture explicitly
-const CAPTURED_KEYS = new Set([
-  "Enter",
-  "Tab",
-  "Escape",
-  "ArrowUp",
-  "ArrowDown",
-  "ArrowLeft",
-  "ArrowRight",
-  "Home",
-  "End",
-  "PageUp",
-  "PageDown",
-  "Backspace",
-  "Delete",
-]);
+// Action keys only. Editing/caret keys (Backspace/Delete/Arrows/Home/End)
+// deliberately excluded: they fragmented every corrected input into a stream
+// of key_press steps, while the final field value is already captured by the
+// input handler.
+const CAPTURED_KEYS = new Set(["Enter", "Tab", "Escape", "PageUp", "PageDown"]);
 
 function handleKeydown(event: KeyboardEvent) {
   if (!isRecordingActive) return;
@@ -1101,6 +1092,21 @@ export default defineContentScript({
         }
       }
       // If needed, handle other message types here
+    });
+
+    // bfcache restores skip the load path entirely - without this, a page
+    // restored via back/forward silently stops recording until reload.
+    window.addEventListener("pageshow", (event) => {
+      if (!event.persisted) return;
+      try {
+        chrome.runtime.sendMessage({ type: "REQUEST_RECORDING_STATUS" }, (response) => {
+          if (chrome.runtime.lastError) return;
+          if (response && response.isRecordingEnabled) startRecorder();
+          else stopRecorder();
+        });
+      } catch {
+        console.warn("Extension context invalidated - reload the page to continue recording.");
+      }
     });
 
     // Request initial status when the script loads

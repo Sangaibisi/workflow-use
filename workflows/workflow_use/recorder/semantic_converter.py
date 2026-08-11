@@ -29,7 +29,9 @@ class SemanticWorkflowConverter:
 		semantic_workflow['workflow_analysis'] = (
 			'Semantic version of recorded workflow. Uses visible text to identify elements instead of CSS selectors for improved reliability.'
 		)
-		if 'name' in semantic_workflow:
+		if 'name' in semantic_workflow and not str(semantic_workflow['name']).endswith(' (Semantic)'):
+			# Idempotent: re-converting an already-semantic workflow must not
+			# stack '(Semantic) (Semantic)' suffixes onto the name
 			semantic_workflow['name'] = f'{semantic_workflow["name"]} (Semantic)'
 
 		# Convert steps to use semantic targeting

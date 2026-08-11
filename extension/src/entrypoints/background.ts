@@ -292,15 +292,18 @@ export default defineBackground(() => {
     }
 
     lastWorkflowHash = currentWorkflowHash;
-    // console.log("[DEBUG] broadcastWorkflowDataUpdate: Steps changed, workflowData object:", JSON.parse(JSON.stringify(uiWorkflowData))); // Optional
 
-    // Send semantic workflow update to Python server
-    const eventToSend: HttpWorkflowUpdateEvent = {
-      type: "WORKFLOW_UPDATE",
-      timestamp: Date.now(),
-      payload: semanticWorkflowData, // Send semantic format to server
-    };
-    sendEventToServer(eventToSend);
+    // Send semantic workflow update to Python server - but never with zero
+    // steps: the schema requires at least one, so empty updates (tab-only
+    // events before any interaction) just produced 422 noise server-side.
+    if (semanticWorkflowData.steps.length > 0) {
+      const eventToSend: HttpWorkflowUpdateEvent = {
+        type: "WORKFLOW_UPDATE",
+        timestamp: Date.now(),
+        payload: semanticWorkflowData, // Send semantic format to server
+      };
+      sendEventToServer(eventToSend);
+    }
     return uiWorkflowData; // Return UI format to extension
   }
 

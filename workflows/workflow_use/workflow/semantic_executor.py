@@ -729,13 +729,6 @@ class SemanticWorkflowExecutor:
 		"""Execute click step using semantic mapping with improved selector strategies."""
 		page = await self.browser.get_current_page()
 
-		# DEBUG: Check what attributes the step has
-		logger.info(f'🔍 DEBUG: Step attributes: {[attr for attr in dir(step) if not attr.startswith("_")]}')
-		logger.info(f'🔍 DEBUG: hasattr selectorStrategies: {hasattr(step, "selectorStrategies")}')
-		if hasattr(step, 'selectorStrategies'):
-			logger.info(f'🔍 DEBUG: selectorStrategies value: {step.selectorStrategies}')
-			logger.info(f'🔍 DEBUG: selectorStrategies truthy: {bool(step.selectorStrategies)}')
-
 		# PRIORITY 1: Check for explicit selectorStrategies first (most reliable)
 		# These are explicit selectors from the workflow definition and should take precedence
 		if hasattr(step, 'selectorStrategies') and step.selectorStrategies:

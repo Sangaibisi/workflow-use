@@ -32,6 +32,11 @@ export const NodeConfigMenu: React.FC<NodeConfigMenuProps> = ({
       setEditedStepData(null);
       setError(null);
       setSuccess(false);
+      // Clear the chip state too - stale chips from the previously edited
+      // node used to leak into the next node's editor and get written into
+      // its step on Save (silent workflow-file corruption).
+      setCssSelectors([]);
+      setNewSelector("");
     }
   }, [node]);
 
@@ -50,10 +55,14 @@ export const NodeConfigMenu: React.FC<NodeConfigMenuProps> = ({
   }, [onClose]);
 
   useEffect(() => {
-    if (isEditing && editedStepData?.cssSelector && cssSelectors.length === 0) {
-      setCssSelectors(editedStepData.cssSelector.split(" "));
-    }
-  }, [isEditing, editedStepData?.cssSelector, cssSelectors.length]);
+    // (Re)initialize the chip list each time editing starts for the current
+    // node - the old `cssSelectors.length === 0` guard skipped re-splitting
+    // whenever chips from a previous node were still around.
+    if (!isEditing) return;
+    const source = localStepData ?? node?.data?.stepData;
+    setCssSelectors(source?.cssSelector ? source.cssSelector.split(" ") : []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isEditing, node]);
 
   useEffect(() => {
     if (isEditing && !editedStepData && localStepData) {

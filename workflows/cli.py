@@ -30,6 +30,19 @@ app = typer.Typer(
 	no_args_is_help=True,
 )
 
+
+def _prompt_value(prompt_text: str, value_type, default_value):
+	"""typer.prompt wrapper that omits the default entirely when there is none.
+
+	Passing Ellipsis as default made click display '[Ellipsis]' and pressing
+	Enter injected the literal string 'Ellipsis' into the workflow (or crashed
+	float() for number inputs).
+	"""
+	if default_value is not None:
+		return typer.prompt(prompt_text, type=value_type, default=default_value)
+	return typer.prompt(prompt_text, type=value_type)
+
+
 # Default LLM instance to None
 llm_instance: BaseChatModel | None = None
 page_extraction_llm: BaseChatModel | None = None
@@ -410,8 +423,12 @@ async def _convert_recording_to_semantic_workflow(recording_data, description, s
 	# Initialize semantic extractor
 	semantic_extractor = SemanticExtractor()
 
-	# Start browser to process pages
+	# Start browser to process pages. Without an explicit start(),
+	# get_current_page() returns None and every page.goto below raised
+	# AttributeError - swallowed into 'Could not extract semantic mapping'
+	# warnings, so the advertised enrichment silently no-opped on every run.
 	browser = Browser()
+	await browser.start()
 
 	semantic_steps = []
 	current_url = None
@@ -1287,21 +1304,15 @@ def run_workflow_command(
 					if var_type == 'bool':
 						input_val = typer.confirm(full_prompt_text, default=default_value if default_value is not None else None)
 					elif var_type == 'number':
-						input_val = typer.prompt(
-							full_prompt_text, type=float, default=default_value if default_value is not None else ...
-						)
+						input_val = _prompt_value(full_prompt_text, float, default_value)
 					elif var_type == 'string':  # Default to string for other unknown types as well
-						input_val = typer.prompt(
-							full_prompt_text, type=str, default=default_value if default_value is not None else ...
-						)
+						input_val = _prompt_value(full_prompt_text, str, default_value)
 					else:  # Should ideally not happen if schema is validated, but good to have a fallback
 						typer.secho(
 							f"Warning: Unknown type '{var_type}' for variable '{input_def.name}'. Treating as string.",
 							fg=typer.colors.YELLOW,
 						)
-						input_val = typer.prompt(
-							full_prompt_text, type=str, default=default_value if default_value is not None else ...
-						)
+						input_val = _prompt_value(full_prompt_text, str, default_value)
 
 					inputs[input_def.name] = input_val
 					typer.echo()  # Add space after each prompt
@@ -1458,21 +1469,15 @@ def run_workflow_no_ai_command(
 					if var_type == 'bool':
 						input_val = typer.confirm(full_prompt_text, default=default_value if default_value is not None else None)
 					elif var_type == 'number':
-						input_val = typer.prompt(
-							full_prompt_text, type=float, default=default_value if default_value is not None else ...
-						)
+						input_val = _prompt_value(full_prompt_text, float, default_value)
 					elif var_type == 'string':  # Default to string for other unknown types as well
-						input_val = typer.prompt(
-							full_prompt_text, type=str, default=default_value if default_value is not None else ...
-						)
+						input_val = _prompt_value(full_prompt_text, str, default_value)
 					else:  # Should ideally not happen if schema is validated, but good to have a fallback
 						typer.secho(
 							f"Warning: Unknown type '{var_type}' for variable '{input_def.name}'. Treating as string.",
 							fg=typer.colors.YELLOW,
 						)
-						input_val = typer.prompt(
-							full_prompt_text, type=str, default=default_value if default_value is not None else ...
-						)
+						input_val = _prompt_value(full_prompt_text, str, default_value)
 
 					inputs[input_def.name] = input_val
 					typer.echo()  # Add space after each prompt
@@ -1924,7 +1929,7 @@ def run_workflow_csv_command(
 				results.append(result)
 
 				# Check if we should stop execution due to critical failures
-				if result['failure_type'] in ['global_failure_limit', 'consecutive_failures']:
+				if result.get('failure_type') in ['global_failure_limit', 'consecutive_failures']:
 					typer.echo()
 					typer.secho(
 						'🛑 STOPPING EXECUTION: Critical workflow failure detected.', fg=typer.colors.BRIGHT_RED, bold=True
@@ -2045,6 +2050,7 @@ def run_workflow_csv_command(
 						return {
 							'row_number': row_number,
 							'status': 'failed',
+							'failure_type': 'missing_required_field',
 							'error': f'Required field "{column_name}" is empty',
 							'duration': 0,
 							'steps_executed': 0,
@@ -2069,6 +2075,7 @@ def run_workflow_csv_command(
 					return {
 						'row_number': row_number,
 						'status': 'failed',
+						'failure_type': 'type_conversion_error',
 						'error': f'Type conversion error for field "{column_name}": {e}',
 						'duration': 0,
 						'steps_executed': 0,
