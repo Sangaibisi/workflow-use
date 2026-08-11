@@ -683,46 +683,33 @@ class SemanticWorkflowExecutor:
 		"""Execute navigation step."""
 		page = await self.browser.get_current_page()
 
-		# Get current URL and normalize both URLs for comparison
+		# Skip navigation if we're already at (or were redirected to) the target URL
 		current_url = await page.get_url()
-		target_url = step.url
-
-		# Normalize URLs by removing fragments and trailing slashes
-		def normalize_url(url: str) -> str:
-			if not url:
-				return ''
-			# Remove fragment (everything after #)
-			if '#' in url:
-				url = url.split('#')[0]
-			# Remove trailing slash
-			return url.rstrip('/')
-
-		current_normalized = normalize_url(current_url)
-		target_normalized = normalize_url(target_url)
-
-		# Skip navigation if we're already at the target URL
-		if current_normalized == target_normalized:
+		if self._urls_equivalent(current_url, step.url):
 			msg = f'⏭️ Skipped navigation - already at URL: {step.url}'
 			logger.info(msg)
 			# Still refresh semantic mapping even if we don't navigate, in case page state has changed
 			await self._refresh_semantic_mapping()
 			return ActionResult(extracted_content=msg, include_in_memory=True)
 
-		# Perform navigation
-		await page.goto(step.url)
-
-		# Wait for page to load and dynamic content (SPAs, etc.)
-		await asyncio.sleep(3)
-
-		# Wait for common form elements to be present (indicates page is ready)
-		if await cdp.wait_for_element(page, 'input, button, form, textarea, select', timeout_ms=10000, state='attached') is None:
-			logger.warning('No form elements found after navigation, continuing anyway')
-
-		# Refresh semantic mapping after navigation
-		await self._refresh_semantic_mapping()
-
-		# Execute navigation with verification and retry
+		# The goto lives INSIDE the executor so retries actually re-navigate
+		# (previously retries only re-verified the same mismatched URL).
 		async def navigation_executor():
+			await page.goto(step.url)
+
+			# Wait for page to load and dynamic content (SPAs, etc.)
+			await asyncio.sleep(3)
+
+			# Wait for common form elements to be present (indicates page is ready)
+			if (
+				await cdp.wait_for_element(page, 'input, button, form, textarea, select', timeout_ms=10000, state='attached')
+				is None
+			):
+				logger.warning('No form elements found after navigation, continuing anyway')
+
+			# Refresh semantic mapping after navigation
+			await self._refresh_semantic_mapping()
+
 			msg = f'🔗 Navigated to URL: {step.url}'
 			logger.info(msg)
 			return ActionResult(extracted_content=msg, include_in_memory=True)
@@ -1903,8 +1890,38 @@ class SemanticWorkflowExecutor:
 			logger.info(f"'{text}' -> {element_info['deterministic_id']} ({element_info['selectors']})")
 		logger.info('=== End Semantic Mapping ===')
 
+	# Step types whose re-execution can cause duplicate server-side effects
+	# (re-clicking submit, re-pressing Enter). Inputs/selects/navigations are
+	# idempotent: re-filling the same value or re-navigating is safe.
+	SIDE_EFFECT_STEP_TYPES = frozenset({'click', 'key_press'})
+
+	async def _capture_page_signature(self) -> Optional[str]:
+		"""Cheap page-state fingerprint (URL + DOM size + text length).
+
+		Used to decide whether a side-effectful action had ANY observable effect:
+		if the signature is unchanged after a click, re-executing it is safe.
+		"""
+		try:
+			page = await self.browser.get_current_page()
+			signature = await page.evaluate(
+				'() => JSON.stringify([location.href, document.querySelectorAll("*").length, '
+				'document.body ? document.body.innerText.length : 0])'
+			)
+			return str(signature) if signature else None
+		except Exception:
+			return None
+
 	async def _execute_with_verification_and_retry(self, step_executor, step, verification_method):
-		"""Execute a step with verification and retry logic."""
+		"""Execute a step with verification and retry logic.
+
+		Idempotency guard: once a side-effectful action (click/key_press) has been
+		dispatched, a failed verification does NOT blindly re-execute it. The
+		verifier is re-run first (the action may have landed and verification was
+		merely late, e.g. a redirect completing), and re-execution is only allowed
+		when the page signature shows the action had no observable effect at all.
+		This prevents duplicate form posts/orders on non-idempotent targets when a
+		verifier is over-strict.
+		"""
 		# Check if we've hit global failure limits before starting
 		if self.global_failure_count >= self.max_global_failures:
 			error_msg = f'❌ Global failure limit reached ({self.global_failure_count}/{self.max_global_failures}). Workflow appears to be encountering systematic issues.'
@@ -1924,6 +1941,15 @@ class SemanticWorkflowExecutor:
 		last_exception = None
 		last_result = None
 		pre_step_state = None
+		is_side_effectful = getattr(step, 'type', '') in self.SIDE_EFFECT_STEP_TYPES
+		action_dispatched = False  # a step_executor() call completed without raising
+		page_changed_since_dispatch = False
+
+		def _mark_success(result):
+			self.consecutive_failures = 0
+			self.consecutive_verification_failures = 0
+			self.last_successful_step = step.description if hasattr(step, 'description') else str(step.type)
+			return result
 
 		for attempt in range(self.max_retries + 1):  # +1 for initial attempt
 			try:
@@ -1934,13 +1960,38 @@ class SemanticWorkflowExecutor:
 					# Small delay before retry
 					await asyncio.sleep(1)
 
+				if attempt > 0 and action_dispatched:
+					# Verify-before-retry: the previous dispatch may have succeeded
+					# with verification lagging behind (redirect, SPA transition).
+					if await verification_method():
+						logger.info(f'✅ Step verified on re-check (attempt {attempt}) without re-executing')
+						return _mark_success(last_result)
+					if is_side_effectful and page_changed_since_dispatch:
+						# The action observably changed the page but verification is
+						# unhappy - re-firing could duplicate a submit/order. Keep
+						# re-verifying on later attempts instead of re-executing.
+						logger.warning(
+							'⚠️ Skipping re-execution of side-effectful step (page already changed after dispatch); re-verifying instead'
+						)
+						continue
+
 				# Capture state before step execution (for deterministic verification)
 				if self.step_verifier:
 					pre_step_state = await self.step_verifier.capture_pre_step_state(self.browser)
 
+				pre_signature = await self._capture_page_signature() if is_side_effectful else None
+
 				# Execute the step
 				result = await step_executor()
+				action_dispatched = True
 				last_result = result
+
+				if is_side_effectful:
+					post_signature = await self._capture_page_signature()
+					# Unknown signatures count as 'changed' (fail safe: don't re-fire)
+					page_changed_since_dispatch = (
+						pre_signature is None or post_signature is None or pre_signature != post_signature
+					)
 
 				# Check for validation errors immediately after execution
 				validation_errors = await self._detect_form_validation_errors()
@@ -1976,10 +2027,7 @@ class SemanticWorkflowExecutor:
 						logger.info(f'✅ Step succeeded on retry {attempt}')
 
 					# Reset all failure counters on success
-					self.consecutive_failures = 0
-					self.consecutive_verification_failures = 0
-					self.last_successful_step = step.description if hasattr(step, 'description') else str(step.type)
-					return result
+					return _mark_success(result)
 				else:
 					# Track verification failures separately from execution failures
 					if not validation_errors and not verification_passed:
@@ -2561,24 +2609,51 @@ class SemanticWorkflowExecutor:
 			logger.warning(f'Input verification failed: {e}')
 			return False
 
+	@staticmethod
+	def _urls_equivalent(current_url: str, expected_url: str) -> bool:
+		"""Redirect-tolerant URL comparison.
+
+		Exact equality fails on ordinary server behavior (http->https upgrade,
+		added locale segments or query params, trailing-slash canonicalization,
+		www. differences). Navigating to *expected* and landing on such a variant
+		is a SUCCESSFUL navigation. Cross-host redirects still fail.
+		"""
+		from urllib.parse import urlparse
+
+		def _norm(url: str) -> str:
+			return (url or '').split('#')[0].rstrip('/')
+
+		if _norm(current_url) == _norm(expected_url):
+			return True
+
+		try:
+			cur, exp = urlparse(_norm(current_url)), urlparse(_norm(expected_url))
+		except ValueError:
+			return False
+
+		def _host(parsed) -> str:
+			host = (parsed.netloc or '').lower()
+			return host[4:] if host.startswith('www.') else host
+
+		if not _host(cur) or _host(cur) != _host(exp):
+			return False  # landed on a different site: real failure
+
+		cur_path = cur.path.rstrip('/')
+		exp_path = exp.path.rstrip('/')
+		if cur_path == exp_path:
+			return True  # scheme/query/fragment differences are tolerated
+		if not exp_path:
+			return True  # expected the site root; locale/home redirects are fine
+		# Server deepened the path (e.g. /login -> /login/identifier)
+		return cur_path.startswith(exp_path + '/')
+
 	async def _verify_navigation_action(self, expected_url: str) -> bool:
-		"""Verify that navigation succeeded by checking current URL."""
+		"""Verify that navigation succeeded by checking current URL (redirect-tolerant)."""
 		try:
 			page = await self.browser.get_current_page()
 			current_url = await page.get_url()
 
-			# Normalize URLs for comparison
-			def normalize_url(url: str) -> str:
-				if not url:
-					return ''
-				if '#' in url:
-					url = url.split('#')[0]
-				return url.rstrip('/')
-
-			current_normalized = normalize_url(current_url)
-			expected_normalized = normalize_url(expected_url)
-
-			matches = current_normalized == expected_normalized
+			matches = self._urls_equivalent(current_url, expected_url)
 			logger.info(
 				f"Verification: Current URL '{current_url}' {'matches' if matches else 'does not match'} expected '{expected_url}'"
 			)
