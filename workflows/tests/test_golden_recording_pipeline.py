@@ -196,3 +196,74 @@ def test_deterministic_steps_map_to_registered_actions(saved_workflow):
 		assert step_type in registered, f"step type '{step_type}' has no controller action (have: {sorted(registered)})"
 		action_model = controller.registry.create_action_model(include_actions=[step_type])
 		assert action_model.model_fields, f"empty action model for '{step_type}' - would no-op silently"
+
+
+def test_container_and_sibling_hints_reach_saved_steps():
+	"""containerContext/siblingContext from the extension become
+	container_hint/position_hint - a pipeline that was dead because the
+	converter read keys nothing emitted."""
+	recording = {
+		'name': 'Hints',
+		'description': 'hint fixture',
+		'version': '1.0',
+		'input_schema': [],
+		'steps': [
+			{
+				'type': 'click',
+				'url': 'https://site.example',
+				'cssSelector': 'button.save',
+				'elementTag': 'BUTTON',
+				'elementText': 'Save',
+				'semanticInfo': {
+					'labelText': 'Save',
+					'containerContext': {'type': 'section', 'text': 'Billing address', 'id': ''},
+					'siblingContext': {'position': 1, 'total': 3},
+				},
+			},
+		],
+	}
+	converted = convert_recorded_workflow_to_semantic(recording)
+	step = converted['steps'][0]
+	assert step['container_hint'] == 'Billing address'
+	assert step['position_hint'] == 'item 2 of 3'
+
+
+def test_snake_case_hint_keys_also_accepted():
+	recording = {
+		'name': 'Hints',
+		'description': 'hint fixture',
+		'version': '1.0',
+		'input_schema': [],
+		'steps': [
+			{
+				'type': 'click',
+				'cssSelector': 'button.save',
+				'elementText': 'Save',
+				'semanticInfo': {
+					'labelText': 'Save',
+					'container_context': {'type': 'fieldset', 'text': '', 'id': 'shipping-address'},
+					'sibling_context': {'position': 0, 'total': 2},
+				},
+			},
+		],
+	}
+	converted = convert_recorded_workflow_to_semantic(recording)
+	step = converted['steps'][0]
+	assert step['container_hint'] == 'Shipping Address'
+	assert step['position_hint'] == 'item 1 of 2'
+
+
+def test_tooling_metadata_survives_schema_roundtrip():
+	"""variable_identifier writes workflow['metadata']; the schema used to drop
+	it on the very next load/save."""
+	raw = {
+		'name': 'Meta',
+		'description': 'metadata fixture',
+		'version': '1.0',
+		'input_schema': [],
+		'steps': [{'type': 'navigation', 'url': 'https://site.example'}],
+		'metadata': {'variables_auto_identified': True, 'identified_variable_count': 2},
+	}
+	schema = WorkflowDefinitionSchema(**raw)
+	dumped = schema.model_dump()
+	assert dumped['metadata'] == raw['metadata']

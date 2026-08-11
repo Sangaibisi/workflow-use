@@ -236,6 +236,12 @@ class WorkflowDefinitionSchema(BaseModel):
 		# default=WorkflowInputSchemaDefinition(),
 		description='List of input schema definitions.',
 	)
+	metadata: Optional[Dict[str, Any]] = Field(
+		None,
+		description='Free-form tooling metadata (e.g. variable-identification stats). '
+		'Without this field every schema round-trip silently DROPPED the metadata '
+		'that variable_identifier had just written.',
+	)
 
 	@validator('steps', pre=True)
 	def normalize_llm_step_vocabulary(cls, steps):

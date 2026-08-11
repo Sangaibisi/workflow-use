@@ -702,9 +702,51 @@ function extractSemanticInfo(element: HTMLElement) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     type: (element as any).type || "",
     parentText,
+    // Disambiguation hints for replay: which named container the element sits
+    // in and its position among same-tag siblings. The Python converter turns
+    // these into container_hint / position_hint - a pipeline that was dead
+    // because nothing ever emitted them.
+    containerContext: extractContainerContext(element),
+    siblingContext: extractSiblingContext(element),
     // Radio button specific info
     radioButtonInfo
   };
+}
+
+function extractContainerContext(
+  element: HTMLElement
+): { type: string; text: string; id: string } | null {
+  const container = element.closest(
+    'section, fieldset, form, nav, header, footer, aside, main, [role="group"], [role="region"], [role="navigation"]'
+  );
+  if (!container || container === document.body) return null;
+  const legend = container.querySelector(':scope > legend');
+  const heading = container.querySelector('h1, h2, h3, h4, legend');
+  const text = (
+    legend?.textContent ||
+    heading?.textContent ||
+    container.getAttribute('aria-label') ||
+    ''
+  )
+    .trim()
+    .slice(0, 50);
+  return {
+    type: container.tagName.toLowerCase(),
+    text,
+    id: container.id || ""
+  };
+}
+
+function extractSiblingContext(
+  element: HTMLElement
+): { position: number; total: number } | null {
+  const parent = element.parentElement;
+  if (!parent) return null;
+  const sameTag = Array.from(parent.children).filter(
+    (c) => c.tagName === element.tagName
+  );
+  if (sameTag.length <= 1) return null;
+  return { position: sameTag.indexOf(element), total: sameTag.length };
 }
 
 // --- Custom Click Handler ---

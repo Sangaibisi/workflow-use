@@ -68,14 +68,19 @@ class SemanticWorkflowConverter:
 			if target_text:
 				semantic_step['target_text'] = target_text
 
-				# Extract text-based context hints (no CSS selectors stored)
+				# Extract text-based context hints (no CSS selectors stored).
+				# The extension emits camelCase keys (containerContext); the
+				# snake_case fallbacks keep any externally-produced recordings
+				# working. Until the extension emitted these, this whole hint
+				# pipeline was dead - the replay side supports container_hint/
+				# position_hint but recordings never carried them.
 				semantic_info = step.get('semanticInfo', {})
 				if semantic_info:
 					# Extract container context as text hint
-					container_context = semantic_info.get('container_context', {})
+					container_context = semantic_info.get('containerContext') or semantic_info.get('container_context') or {}
 					if container_context:
-						container_text = container_context.get('text', '').strip()
-						container_id = container_context.get('id', '').strip()
+						container_text = str(container_context.get('text') or '').strip()
+						container_id = str(container_context.get('id') or '').strip()
 
 						if container_text and len(container_text) < 50:
 							semantic_step['container_hint'] = container_text
@@ -84,17 +89,12 @@ class SemanticWorkflowConverter:
 							semantic_step['container_hint'] = formatted_id
 
 					# Extract position context as text hint
-					sibling_context = semantic_info.get('sibling_context', {})
+					sibling_context = semantic_info.get('siblingContext') or semantic_info.get('sibling_context') or {}
 					if sibling_context:
 						position = sibling_context.get('position')
 						total = sibling_context.get('total')
 						if position is not None and total is not None and total > 1:
 							semantic_step['position_hint'] = f'item {position + 1} of {total}'
-
-					# Extract interaction type hint
-					interaction_hints = semantic_info.get('interaction_hints', [])
-					if interaction_hints and isinstance(interaction_hints, list) and len(interaction_hints) > 0:
-						semantic_step['interaction_type'] = interaction_hints[0]  # Use first hint
 
 				# Add a description that mentions the semantic targeting
 				if not semantic_step.get('description'):
@@ -136,19 +136,19 @@ class SemanticWorkflowConverter:
 		semantic_info = step.get('semanticInfo', {})
 		if semantic_info:
 			base_text = None
-			container_context = semantic_info.get('container_context', {})
+			container_context = semantic_info.get('containerContext') or semantic_info.get('container_context') or {}
 
 			# Get base text
 			for field in ['labelText', 'textContent', 'name', 'id']:
-				value = semantic_info.get(field, '').strip()
+				value = str(semantic_info.get(field) or '').strip()
 				if value and len(value) < 100:
 					base_text = value
 					break
 
 			# Add hierarchical context if available
 			if base_text and container_context:
-				container_text = container_context.get('text', '').strip()
-				container_id = container_context.get('id', '').strip()
+				container_text = str(container_context.get('text') or '').strip()
+				container_id = str(container_context.get('id') or '').strip()
 
 				# Create contextual target text
 				if container_text and len(container_text) < 50:
@@ -163,7 +163,7 @@ class SemanticWorkflowConverter:
 
 			# Priority: placeholder > ariaLabel > other fields
 			for field in ['placeholder', 'ariaLabel']:
-				value = semantic_info.get(field, '').strip()
+				value = str(semantic_info.get(field) or '').strip()
 				if value and len(value) < 100:  # Reasonable length for targeting
 					return value
 
