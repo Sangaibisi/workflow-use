@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, List, TypeVar
 from typing import cast as _cast
@@ -509,22 +510,42 @@ Extracted Information:"""
 		except Exception as e:
 			raise ValueError(f'Invalid workflow inputs: {e}') from e
 
+	# Bare identifiers only: {name}. Attribute/index traversal ({obj.attr},
+	# {a[0]}, {0}) is deliberately NOT supported - str.format offered it and
+	# turned every workflow value into a format-string injection surface.
+	_PLACEHOLDER_RE = re.compile(r'\{([a-zA-Z_][a-zA-Z0-9_]*)\}')
+
+	def _substitute_placeholders_in_string(self, text: str) -> str:
+		"""Safe, partial placeholder substitution.
+
+		str.format was all-or-nothing and crash-prone: a stray brace (JSON in a
+		value, '{' in page text) raised ValueError/IndexError, and one missing
+		key aborted resolution of every other placeholder in the string.
+		"""
+		if '{' not in text:
+			return text
+
+		# Honor {{ / }} escapes (literal braces), matching str.format conventions
+		sentinel_open, sentinel_close = '\x00WF_OB\x00', '\x00WF_CB\x00'
+		protected = text.replace('{{', sentinel_open).replace('}}', sentinel_close)
+
+		def _replace(match: 're.Match[str]') -> str:
+			key = match.group(1)
+			if key in self.context:
+				return str(self.context[key])
+			logger.warning(f"Placeholder '{{{key}}}' has no value in the workflow context; leaving it unresolved")
+			return match.group(0)
+
+		substituted = self._PLACEHOLDER_RE.sub(_replace, protected)
+		return substituted.replace(sentinel_open, '{').replace(sentinel_close, '}')
+
 	def _resolve_placeholders(self, data: Any) -> Any:
 		"""Recursively replace placeholders in *data* using current context variables.
 
-		String placeholders are written using Python format syntax, e.g. "{index}".
+		String placeholders are written as "{name}"; "{{" and "}}" are literal braces.
 		"""
 		if isinstance(data, str):
-			try:
-				# Only attempt to format if placeholder syntax is likely present
-				if '{' in data and '}' in data:
-					formatted_data = data.format(**self.context)
-					return formatted_data
-				return data  # No placeholders, return as is
-			except KeyError:
-				# A key in the placeholder was not found in the context.
-				# Return the original string as per previous behavior.
-				return data
+			return self._substitute_placeholders_in_string(data)
 
 		# TODO: This next things are not really supported atm, we'll need to to do it in the future.
 		elif isinstance(data, list):

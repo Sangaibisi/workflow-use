@@ -152,12 +152,35 @@ export default defineBackground(() => {
     return hashHex;
   }
 
+  // Per-session token handed over by the recorder service (written into the
+  // unpacked extension dir before launch). The server rejects event POSTs
+  // without it, closing the open localhost surface where any page or LAN
+  // process could inject fake steps into a recording.
+  let recorderToken: string | null = null;
+  const recorderTokenLoaded: Promise<void> = (async () => {
+    try {
+      const response = await fetch(chrome.runtime.getURL("recorder-token.json"));
+      if (response.ok) {
+        const data = (await response.json()) as { token?: string };
+        recorderToken = data.token ?? null;
+        if (recorderToken) console.log("[Recorder] Session token loaded.");
+      }
+    } catch {
+      // Manually-loaded extension without a recorder session - server posts
+      // will be rejected, which is fine outside a recorder-managed session.
+      console.warn("[Recorder] No session token file found; server sync disabled.");
+    }
+  })();
+
   // Helper function to send data to the Python server
   async function sendEventToServer(eventData: HttpEvent) {
     try {
+      await recorderTokenLoaded;
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (recorderToken) headers["X-Recorder-Token"] = recorderToken;
       await fetch(PYTHON_SERVER_ENDPOINT, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify(eventData),
       });
     } catch (error) {

@@ -2,12 +2,14 @@ import asyncio
 import json
 import os
 import pathlib
+import secrets
 from typing import Optional
 
 import uvicorn
 from browser_use import Browser
 from browser_use.browser.profile import BrowserProfile
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 # Assuming views.py is correctly located for this import path
 from workflow_use.recorder.views import (
@@ -82,7 +84,27 @@ class RecordingService:
 		self.final_workflow_processed_lock = asyncio.Lock()
 		self.final_workflow_processed_flag = False
 
+		# Per-session token: only the recorder-launched extension (which reads the
+		# token file packaged next to it) may post events. Combined with Host and
+		# Origin checks this closes the open localhost surface where any web page
+		# or LAN process could inject fake steps into a recording.
+		self.session_token = secrets.token_urlsafe(24)
+
 		self.app = FastAPI(title='Temporary Recording Event Server')
+
+		@self.app.middleware('http')
+		async def _validate_request(request: Request, call_next):
+			host = (request.headers.get('host') or '').split(':')[0]
+			if host not in ('127.0.0.1', 'localhost'):
+				return JSONResponse(status_code=403, content={'detail': 'Invalid Host header'})
+			origin = request.headers.get('origin')
+			if origin and not origin.startswith('chrome-extension://'):
+				return JSONResponse(status_code=403, content={'detail': 'Origin not allowed'})
+			token = request.headers.get('x-recorder-token')
+			if token != self.session_token:
+				return JSONResponse(status_code=403, content={'detail': 'Missing or invalid recorder token'})
+			return await call_next(request)
+
 		self.app.add_api_route('/event', self._handle_event_post, methods=['POST'], status_code=202)
 		# -- DEBUGGING --
 		# Turn this on to debug requests
@@ -162,6 +184,13 @@ class RecordingService:
 			print(f'[Service] ERROR: Extension directory not found: {EXT_DIR}')
 			self.recording_complete_event.set()  # Signal failure
 			return
+
+		# Hand the per-session token to the extension by packaging it next to the
+		# unpacked extension; the service worker reads it via chrome.runtime.getURL.
+		try:
+			(EXT_DIR / 'recorder-token.json').write_text(json.dumps({'token': self.session_token}))
+		except OSError as e:
+			print(f'[Service] WARNING: could not write recorder token file: {e}')
 
 		# Ensure user data dir exists
 		USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
