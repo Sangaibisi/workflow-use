@@ -3,6 +3,7 @@ import json
 import subprocess
 import tempfile  # For temporary file handling
 import webbrowser
+from datetime import datetime
 from pathlib import Path
 
 import aiofiles
@@ -1373,6 +1374,7 @@ def run_workflow_no_ai_command(
 		)
 		typer.echo()  # Add space
 
+		browser: Browser | None = None
 		try:
 			# Instantiate Browser for the Workflow instance
 			browser = Browser(use_cloud=use_cloud)
@@ -1528,6 +1530,15 @@ def run_workflow_no_ai_command(
 		except Exception as e:
 			typer.secho(f'Error running workflow: {e}', fg=typer.colors.RED)
 			raise typer.Exit(code=1)
+		finally:
+			# The CLI is one-shot; run_with_no_ai keeps the session open
+			# (close_browser_at_end=False), so without this Chrome outlived
+			# the command.
+			if browser:
+				try:
+					await browser.close()
+				except Exception:
+					pass
 
 	return asyncio.run(_run_workflow_no_ai())
 
@@ -1782,7 +1793,9 @@ def run_workflow_csv_command(
 		1,
 		'--max-parallel',
 		'-p',
-		help='Maximum number of parallel workflow executions (default: 1 for sequential execution)',
+		help='Reserved for future concurrent execution. Runs are currently always '
+		'sequential (a single shared browser session cannot replay rows in '
+		'parallel); values > 1 only print a notice.',
 		min=1,
 		max=5,
 	),
@@ -1813,6 +1826,12 @@ def run_workflow_csv_command(
 	Each row in the CSV represents one execution with different input values.
 	CSV column headers should match the workflow input parameter names.
 	"""
+
+	# The browser is created deep inside _run_workflow_csv; parking the handle
+	# here lets the wrapper below close it on EVERY exit path (normal end,
+	# typer.Exit for validation/failed rows, unexpected errors) - Chrome used
+	# to outlive the command.
+	_browser_holder: list = []
 
 	async def _run_workflow_csv():
 		from datetime import datetime
@@ -1867,6 +1886,7 @@ def run_workflow_csv_command(
 		# Load workflow
 		try:
 			browser = Browser(use_cloud=use_cloud)
+			_browser_holder.append(browser)
 
 			dummy_llm = None
 			if use_ai and llm_instance:
@@ -1919,41 +1939,33 @@ def run_workflow_csv_command(
 		results = []
 		start_time = datetime.now()
 
-		# Execute workflows
-		if max_parallel == 1:
-			# Sequential execution
-			typer.echo(typer.style('Starting sequential execution...', bold=True))
-			for idx, row in df.iterrows():
-				typer.echo(f'\n--- Execution {idx + 1 - start_idx} of {len(df)} ---')
-				result = await _execute_single_workflow(workflow_obj, row, idx + 1, use_ai and dummy_llm)
-				results.append(result)
+		# Execute workflows. All rows share ONE Workflow object (and thus one
+		# browser session, kept open between rows), so rows cannot actually run
+		# concurrently. The old "parallel" branch silently ran batched
+		# sequential anyway - while also dropping the critical-failure early
+		# stop below. Be honest instead: one loop, one behavior.
+		if max_parallel > 1:
+			typer.secho(
+				f'Note: --max-parallel {max_parallel} requested, but concurrent execution '
+				'is not implemented yet (rows share a single browser session). '
+				'Running sequentially.',
+				fg=typer.colors.YELLOW,
+			)
+		typer.echo(typer.style('Starting sequential execution...', bold=True))
+		for idx, row in df.iterrows():
+			typer.echo(f'\n--- Execution {idx + 1 - start_idx} of {len(df)} ---')
+			result = await _execute_single_workflow(workflow_obj, row, idx + 1, use_ai and dummy_llm)
+			results.append(result)
 
-				# Check if we should stop execution due to critical failures
-				if result.get('failure_type') in ['global_failure_limit', 'consecutive_failures']:
-					typer.echo()
-					typer.secho(
-						'🛑 STOPPING EXECUTION: Critical workflow failure detected.', fg=typer.colors.BRIGHT_RED, bold=True
-					)
-					typer.echo(f'Reason: {result["error"]}')
-					typer.echo(f'Completed {len(results)} out of {len(df)} planned executions.')
-					break
-		else:
-			# Parallel execution (simplified for now)
-			typer.echo(typer.style(f'Starting parallel execution (max {max_parallel} concurrent)...', bold=True))
-			typer.echo('Note: Parallel execution is experimental and may cause browser conflicts.')
-
-			# For now, implement as batched sequential to avoid browser conflicts
-			batch_size = max_parallel
-			for i in range(0, len(df), batch_size):
-				batch = df.iloc[i : i + batch_size]
-				typer.echo(
-					f'\n--- Batch {i // batch_size + 1}: Processing rows {i + start_row} to {min(i + batch_size - 1 + start_row, start_row + len(df) - 1)} ---'
+			# Check if we should stop execution due to critical failures
+			if result.get('failure_type') in ['global_failure_limit', 'consecutive_failures']:
+				typer.echo()
+				typer.secho(
+					'🛑 STOPPING EXECUTION: Critical workflow failure detected.', fg=typer.colors.BRIGHT_RED, bold=True
 				)
-
-				for idx, row in batch.iterrows():
-					typer.echo(f'\nExecution {idx + 1 - start_idx} of {len(df)}')
-					result = await _execute_single_workflow(workflow_obj, row, idx + 1, use_ai and dummy_llm)
-					results.append(result)
+				typer.echo(f'Reason: {result["error"]}')
+				typer.echo(f'Completed {len(results)} out of {len(df)} planned executions.')
+				break
 
 		# Summary
 		end_time = datetime.now()
@@ -2141,7 +2153,17 @@ def run_workflow_csv_command(
 				**dict(row_data),
 			}
 
-	return asyncio.run(_run_workflow_csv())
+	async def _run_and_close():
+		try:
+			return await _run_workflow_csv()
+		finally:
+			for b in _browser_holder:
+				try:
+					await b.close()
+				except Exception:
+					pass
+
+	return asyncio.run(_run_and_close())
 
 
 @app.command(name='mcp-server', help='Starts the MCP server which expose all the created workflows as tools.')
@@ -2151,6 +2173,13 @@ def mcp_server_command(
 		'--port',
 		'-p',
 		help='Port to run the MCP server on.',
+	),
+	host: str = typer.Option(
+		'127.0.0.1',
+		'--host',
+		help='Interface to bind. The server has NO authentication and its tools '
+		'drive a real browser with your recorded workflows, so it binds to '
+		'loopback by default; expose it deliberately with --host 0.0.0.0.',
 	),
 ):
 	"""
@@ -2164,9 +2193,17 @@ def mcp_server_command(
 
 	mcp = get_mcp_server(llm_instance, page_extraction_llm=page_extraction_llm, workflow_dir='./tmp')
 
+	if host not in ('127.0.0.1', 'localhost', '::1'):
+		typer.secho(
+			f'WARNING: binding to {host} exposes an unauthenticated server that can '
+			'replay your recorded workflows to the network.',
+			fg=typer.colors.YELLOW,
+			bold=True,
+		)
+
 	mcp.run(
 		transport='sse',
-		host='0.0.0.0',
+		host=host,
 		port=port,
 	)
 
@@ -2178,22 +2215,33 @@ def launch_gui():
 
 	logs_dir = Path('./tmp/logs')
 	logs_dir.mkdir(parents=True, exist_ok=True)
-	backend_log = open(logs_dir / 'backend.log', 'w')
-	frontend_log = open(logs_dir / 'frontend.log', 'w')
+	# Append instead of truncate: mode 'w' wiped the previous run's logs at
+	# startup - exactly the logs you need when investigating why the last run
+	# died. A timestamped header separates runs.
+	run_header = f'\n===== launch-gui run {datetime.now().isoformat(timespec="seconds")} =====\n'
+	backend_log = open(logs_dir / 'backend.log', 'a')
+	frontend_log = open(logs_dir / 'frontend.log', 'a')
+	for log_file in (backend_log, frontend_log):
+		log_file.write(run_header)
+		log_file.flush()
 
-	backend = subprocess.Popen(['uvicorn', 'backend.api:app', '--reload'], stdout=backend_log, stderr=subprocess.STDOUT)
-	typer.echo(typer.style('Starting frontend...', bold=True))
-	frontend = subprocess.Popen(['npm', 'run', 'dev'], cwd='../ui', stdout=frontend_log, stderr=subprocess.STDOUT)
-	typer.echo(typer.style('Opening browser...', bold=True))
-	webbrowser.open('http://localhost:5173')
 	try:
-		typer.echo(typer.style('Press Ctrl+C to stop the GUI and servers.', fg=typer.colors.YELLOW, bold=True))
-		backend.wait()
-		frontend.wait()
-	except KeyboardInterrupt:
-		typer.echo(typer.style('\nShutting down servers...', fg=typer.colors.RED, bold=True))
-		backend.terminate()
-		frontend.terminate()
+		backend = subprocess.Popen(['uvicorn', 'backend.api:app', '--reload'], stdout=backend_log, stderr=subprocess.STDOUT)
+		typer.echo(typer.style('Starting frontend...', bold=True))
+		frontend = subprocess.Popen(['npm', 'run', 'dev'], cwd='../ui', stdout=frontend_log, stderr=subprocess.STDOUT)
+		typer.echo(typer.style('Opening browser...', bold=True))
+		webbrowser.open('http://localhost:5173')
+		try:
+			typer.echo(typer.style('Press Ctrl+C to stop the GUI and servers.', fg=typer.colors.YELLOW, bold=True))
+			backend.wait()
+			frontend.wait()
+		except KeyboardInterrupt:
+			typer.echo(typer.style('\nShutting down servers...', fg=typer.colors.RED, bold=True))
+			backend.terminate()
+			frontend.terminate()
+	finally:
+		backend_log.close()
+		frontend_log.close()
 
 
 @app.command(name='generate-csv-template', help='Generate a CSV template file for a workflow to help with bulk execution.')
@@ -2317,9 +2365,15 @@ def generate_csv_template_command(
 @app.command(name='generate-workflow')
 def generate_workflow_from_task(
 	task: str = typer.Argument(..., help='The task to automate (e.g., "Fill out the contact form")'),
-	agent_model: str = typer.Option('gpt-4.1-mini', help='Model for browser automation'),
-	extraction_model: str = typer.Option('gpt-4.1-mini', help='Model for page extraction'),
-	workflow_model: str = typer.Option('gpt-4.1', help='Model for workflow generation'),
+	agent_model: str = typer.Option(
+		'bu-latest', help="Model for browser automation (a 'bu-*' alias or provider-prefixed id like 'openai/gpt-5.5')"
+	),
+	extraction_model: str = typer.Option(
+		'bu-latest', help="Model for page extraction (a 'bu-*' alias or provider-prefixed id)"
+	),
+	workflow_model: str = typer.Option(
+		'bu-latest', help="Model for workflow generation (a 'bu-*' alias or provider-prefixed id)"
+	),
 	save_to_storage: bool = typer.Option(True, help='Save workflow to storage database'),
 	output_file: Path | None = typer.Option(None, help='Optional: Save to specific file path'),
 	use_cloud: bool = typer.Option(False, help='Use Browser-Use Cloud browser'),
@@ -2335,18 +2389,25 @@ def generate_workflow_from_task(
 	Example:
 	  python cli.py generate-workflow "Fill out the contact form on example.com"
 	"""
-	if not healing_service:
-		typer.secho('Error: HealingService not initialized. Cannot generate workflow.', fg=typer.colors.RED)
-		raise typer.Exit(code=1)
-
 	typer.echo()
 	typer.secho('🤖 GENERATION MODE: Creating workflow from task', fg=typer.colors.CYAN, bold=True)
 	typer.echo(f'Task: {typer.style(task, fg=typer.colors.YELLOW)}')
 	typer.echo()
 
-	# Initialize LLMs
-	agent_llm = ChatBrowserUse(model='bu-latest')
-	extraction_llm = ChatBrowserUse(model='bu-latest')
+	# Initialize LLMs from the CLI options. These used to be printed but
+	# silently ignored - everything ran on a hardcoded bu-latest while the
+	# banner claimed otherwise.
+	try:
+		agent_llm = ChatBrowserUse(model=agent_model)
+		extraction_llm = ChatBrowserUse(model=extraction_model)
+		generation_service = (
+			healing_service
+			if healing_service and workflow_model == 'bu-latest'
+			else HealingService(llm=ChatBrowserUse(model=workflow_model))
+		)
+	except ValueError as e:
+		typer.secho(f'Error: {e}', fg=typer.colors.RED)
+		raise typer.Exit(code=1)
 
 	typer.echo('Starting browser automation to complete the task...')
 	typer.echo(f'  Agent Model: {agent_model}')
@@ -2358,7 +2419,7 @@ def generate_workflow_from_task(
 	try:
 		# Generate workflow from task
 		workflow_definition = asyncio.run(
-			healing_service.generate_workflow_from_prompt(
+			generation_service.generate_workflow_from_prompt(
 				prompt=task, agent_llm=agent_llm, extraction_llm=extraction_llm, use_cloud=use_cloud
 			)
 		)

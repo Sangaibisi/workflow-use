@@ -30,13 +30,17 @@ dependencies = [
 ]
 
 
-[tool.uv]
-dev-dependencies = [
+# PEP 735 dependency groups (tool.uv.dev-dependencies is deprecated and
+# warned on every uv invocation)
+[dependency-groups]
+dev = [
     "build==1.2.2.post1",
     "ruff==0.11.12",
     "pytest==8.4.2",
     "pytest-asyncio==1.2.0",
 ]
+
+[tool.uv]
 # Security constraints for transitive dependencies (pulled in by browser-use
 # and friends). Each floor lifts the resolved version out of a vulnerable range.
 constraint-dependencies = [
