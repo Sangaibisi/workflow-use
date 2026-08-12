@@ -267,3 +267,32 @@ def test_tooling_metadata_survives_schema_roundtrip():
 	schema = WorkflowDefinitionSchema(**raw)
 	dumped = schema.model_dump()
 	assert dumped['metadata'] == raw['metadata']
+
+
+def test_variable_identification_survives_explicit_null_metadata():
+	"""A workflow that round-tripped through the schema carries an explicit
+	`metadata: None`. Membership was tested on the KEY, so the next line
+	assigned into None and killed variable identification (and with it the
+	whole input_schema) for every recorded workflow."""
+	from workflow_use.workflow.variable_identifier import identify_variables_in_workflow
+
+	round_tripped = {
+		'name': 'Round-tripped',
+		'description': 'came back from WorkflowDefinitionSchema.model_dump()',
+		'version': '1.0',
+		'input_schema': [],
+		'metadata': None,  # <- what model_dump() emits when unset
+		'steps': [
+			{
+				'type': 'input',
+				'cssSelector': 'input#email',
+				'elementTag': 'INPUT',
+				'target_text': 'Email',
+				'value': 'someone@example.com',
+			}
+		],
+	}
+
+	result = identify_variables_in_workflow(round_tripped, 0.5, False)
+	assert result['metadata']['variables_auto_identified'] is True
+	assert result['input_schema'], 'variable identification produced no inputs'

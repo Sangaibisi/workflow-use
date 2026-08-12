@@ -193,8 +193,13 @@ class VariableIdentifier:
 		if identified_vars:
 			workflow['input_schema'] = self._generate_input_schema(identified_vars)
 
-		# Add metadata about variable identification
-		if 'metadata' not in workflow:
+		# Add metadata about variable identification. Test membership on the
+		# VALUE, not the key: a workflow that round-tripped through
+		# WorkflowDefinitionSchema carries an explicit `metadata: None`, so a
+		# `not in` check passed and the next line crashed on None - killing
+		# variable identification (and the whole input_schema) for every
+		# recorded workflow.
+		if not workflow.get('metadata'):
 			workflow['metadata'] = {}
 		workflow['metadata']['variables_auto_identified'] = True
 		workflow['metadata']['identified_variable_count'] = len(identified_vars)
