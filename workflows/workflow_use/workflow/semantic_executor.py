@@ -30,6 +30,20 @@ from workflow_use.workflow.step_verifier import StepVerifier, VerificationResult
 
 logger = logging.getLogger(__name__)
 
+# Shape probe for an input target. Every field is coerced to a string: CDP's
+# returnByValue OMITS keys whose value is `undefined`, so probing a wrapper
+# element (a div the selector resolved to instead of the real input) used to
+# return {'tagName': 'DIV'} and every element_type['type'] read raised a bare
+# KeyError: 'type' - a crash where the user needed "this isn't an input".
+_ELEMENT_SHAPE_JS = """(function() {
+	return {
+		tagName: String(this.tagName || ''),
+		type: String(this.type || ''),
+		value: String(this.value == null ? '' : this.value),
+		isContentEditable: Boolean(this.isContentEditable)
+	};
+})"""
+
 
 class _ExtractGoalAdapter:
 	"""Expose a PageExtractionStep (``goal``) with the ExtractStep field names."""
@@ -567,8 +581,31 @@ class SemanticWorkflowExecutor:
 		logger.info(f'No valid position hint, returning first match (Priority {priority}): {selected_text}')
 		return selected_element
 
-	async def _try_direct_selector(self, target_text: str) -> Optional[str]:
-		"""Try to use target_text as a direct selector (ID or name) with improved robustness."""
+	async def _selector_tag_matches(self, selector: str, expected_tag: str) -> bool:
+		"""True when the first match for *selector* has the recorded tag.
+
+		target_text often falls back to a field's name/id, so '#name' can match
+		a WRAPPER that shares the id - on Wikipedia '#search' is the <form>, not
+		the input inside it. The recorded elementTag settles it.
+		"""
+		try:
+			elements = await self._get_elements_by_selector(selector)
+			if not elements:
+				return False
+			shape = await self._element_evaluate(elements[0], _ELEMENT_SHAPE_JS) or {}
+			actual = shape.get('tagName', '')
+			if not actual:
+				return True  # can't tell - don't block the candidate
+			return actual.upper() == expected_tag.upper()
+		except Exception:
+			return True  # probing failed; leave the decision to the caller
+
+	async def _try_direct_selector(self, target_text: str, expected_tag: Optional[str] = None) -> Optional[str]:
+		"""Try to use target_text as a direct selector (ID or name) with improved robustness.
+
+		*expected_tag* is the recorded ``elementTag``; candidates resolving to a
+		different tag are skipped rather than typed/clicked blindly.
+		"""
 		if not target_text or not target_text.replace('_', '').replace('-', '').replace('.', '').isalnum():
 			return None
 
@@ -608,6 +645,11 @@ class SemanticWorkflowExecutor:
 
 				# Check if it's visible (wait_for_selector doesn't exist on CDP)
 				if await cdp.wait_for_element(page, selector, timeout_ms=2000) is None:
+					continue
+
+				# Reject a candidate that resolves to the wrong kind of element
+				if expected_tag and not await self._selector_tag_matches(selector, expected_tag):
+					logger.debug(f'Skipping {selector}: resolves to a non-<{expected_tag.lower()}> element')
 					continue
 
 				# Check if this selector resolves to multiple elements (strict mode violation)
@@ -863,7 +905,7 @@ class SemanticWorkflowExecutor:
 			# 2. Use hierarchical selector if available and specific enough
 			# 3. Fall back to CSS selector (which should now include href for links)
 
-			direct_selector = await self._try_direct_selector(step.target_text)
+			direct_selector = await self._try_direct_selector(step.target_text, getattr(step, 'elementTag', None))
 			if direct_selector:
 				selector_to_use = direct_selector
 				logger.info(f"Using direct selector: '{target_identifier}' -> {selector_to_use}")
@@ -1458,7 +1500,7 @@ class SemanticWorkflowExecutor:
 			target_identifier = step.target_text
 
 			# Try direct selector first (for ID/name attributes)
-			selector_to_use = await self._try_direct_selector(step.target_text)
+			selector_to_use = await self._try_direct_selector(step.target_text, getattr(step, 'elementTag', None))
 
 			# If direct selector fails, try semantic mapping
 			if not selector_to_use:
@@ -1539,14 +1581,23 @@ class SemanticWorkflowExecutor:
 			raise Exception(f'Element not found with selector: {selector_to_use}')
 
 		# Check element type to handle different input types properly
-		element_type = await self._element_evaluate(
-			elements[0], '(function() { return { tagName: this.tagName, type: this.type, value: this.value }; })'
-		)
+		element_type = await self._element_evaluate(elements[0], _ELEMENT_SHAPE_JS)
 
-		if element_type['tagName'] == 'SELECT':
+		if (element_type or {}).get('tagName', '') == 'SELECT':
 			return ActionResult(
 				extracted_content='Ignored input into select element',
 				include_in_memory=True,
+			)
+
+		# The selector can resolve to a wrapper (a div/span/form around the real
+		# field) - typing into it silently does nothing. Say so plainly instead
+		# of failing three retries deep with an opaque error.
+		shape = element_type or {}
+		tag = shape.get('tagName', '')
+		if tag not in ('INPUT', 'TEXTAREA') and not shape.get('isContentEditable'):
+			raise Exception(
+				f'Selector {selector_to_use!r} resolved to <{tag.lower() or "unknown"}>, which is not an input, '
+				f'textarea or contenteditable element. Recorded target_text: {target_identifier!r}.'
 			)
 
 		# Execute input with verification and retry
@@ -1555,19 +1606,17 @@ class SemanticWorkflowExecutor:
 			if len(elements) == 0:
 				raise Exception(f'Element not found with selector: {selector_to_use}')
 			element = elements[0]
-			element_type = await self._element_evaluate(
-				element, '(function() { return { tagName: this.tagName, type: this.type, value: this.value }; })'
-			)
+			element_type = await self._element_evaluate(element, _ELEMENT_SHAPE_JS)
 
 			# Handle radio buttons and checkboxes with improved strategies
-			if element_type['type'] in ['radio', 'checkbox']:
+			if (element_type or {}).get('type', '') in ['radio', 'checkbox']:
 				success = await self._handle_radio_checkbox_input(
-					selector_to_use, step.value, target_identifier, element_type['type']
+					selector_to_use, step.value, target_identifier, (element_type or {}).get('type', '')
 				)
 				if not success:
-					raise Exception(f'Failed to select {element_type["type"]} button: {target_identifier}')
+					raise Exception(f'Failed to select {(element_type or {}).get("type", "")} button: {target_identifier}')
 
-				action_type = '🔘' if element_type['type'] == 'radio' else '☑️'
+				action_type = '🔘' if (element_type or {}).get('type', '') == 'radio' else '☑️'
 				msg = f"{action_type} Selected '{step.value}' for: {target_identifier or step.description}"
 				logger.info(msg)
 				return ActionResult(extracted_content=msg, include_in_memory=True)
@@ -1588,10 +1637,8 @@ class SemanticWorkflowExecutor:
 			if len(elements) == 0:
 				return False
 			element = elements[0]
-			element_type = await self._element_evaluate(
-				element, '(function() { return { tagName: this.tagName, type: this.type, value: this.value }; })'
-			)
-			return await self._verify_input_action(selector_to_use, step.value, element_type['type'])
+			element_type = await self._element_evaluate(element, _ELEMENT_SHAPE_JS)
+			return await self._verify_input_action(selector_to_use, step.value, (element_type or {}).get('type', ''))
 
 		return await self._execute_with_verification_and_retry(input_executor, step, input_verifier)
 
