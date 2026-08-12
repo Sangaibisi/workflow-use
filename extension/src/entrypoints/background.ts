@@ -79,6 +79,10 @@ export default defineBackground(() => {
             recentUserInteractions,
             isRecordingEnabled,
             lastWorkflowHash,
+            // Recording-session identity: state restored under a DIFFERENT
+            // token belongs to a previous recorder session and must not leak
+            // into this one.
+            sessionToken: recorderToken,
           },
         })
         .catch((error) => console.warn("[Persist] Failed to save recording state:", error));
@@ -87,9 +91,23 @@ export default defineBackground(() => {
 
   async function rehydrateRecordingState(): Promise<void> {
     try {
+      // The token is the recording-session identity; it must be known before
+      // deciding whether stored state belongs to THIS session.
+      await recorderTokenLoaded;
       const stored = await chrome.storage.session.get(STORAGE_KEY);
       const state = stored?.[STORAGE_KEY];
       if (!state) return;
+      // Observed live: a leftover recorder browser's service worker woke up,
+      // re-read the freshly ROTATED token file, and its stored events from
+      // yesterday's browsing were saved into the brand-new recording. State
+      // persisted under a different session token is not ours - discard it.
+      if (recorderToken && state.sessionToken !== recorderToken) {
+        console.warn(
+          "[Persist] Stored recording state belongs to a different recorder session; discarding it."
+        );
+        await chrome.storage.session.remove(STORAGE_KEY);
+        return;
+      }
       // Prepend stored events so anything captured before rehydration survives
       for (const [tabIdStr, events] of Object.entries(
         (state.sessionLogs ?? {}) as { [tabId: string]: StoredEvent[] }
@@ -135,6 +153,28 @@ export default defineBackground(() => {
     }
   });
 
+  // Per-session token handed over by the recorder service (written into the
+  // unpacked extension dir before launch). The server rejects event POSTs
+  // without it, closing the open localhost surface where any page or LAN
+  // process could inject fake steps into a recording. It doubles as the
+  // recording SESSION identity for the persisted state below, so it must be
+  // loaded before rehydration runs.
+  let recorderToken: string | null = null;
+  const recorderTokenLoaded: Promise<void> = (async () => {
+    try {
+      const response = await fetch(chrome.runtime.getURL("recorder-token.json"));
+      if (response.ok) {
+        const data = (await response.json()) as { token?: string };
+        recorderToken = data.token ?? null;
+        if (recorderToken) console.log("[Recorder] Session token loaded.");
+      }
+    } catch {
+      // Manually-loaded extension without a recorder session - server posts
+      // will be rejected, which is fine outside a recorder-managed session.
+      console.warn("[Recorder] No session token file found; server sync disabled.");
+    }
+  })();
+
   let rehydrationComplete = false;
   const stateRehydrated: Promise<void> = rehydrateRecordingState().finally(() => {
     rehydrationComplete = true;
@@ -151,26 +191,6 @@ export default defineBackground(() => {
       .join("");
     return hashHex;
   }
-
-  // Per-session token handed over by the recorder service (written into the
-  // unpacked extension dir before launch). The server rejects event POSTs
-  // without it, closing the open localhost surface where any page or LAN
-  // process could inject fake steps into a recording.
-  let recorderToken: string | null = null;
-  const recorderTokenLoaded: Promise<void> = (async () => {
-    try {
-      const response = await fetch(chrome.runtime.getURL("recorder-token.json"));
-      if (response.ok) {
-        const data = (await response.json()) as { token?: string };
-        recorderToken = data.token ?? null;
-        if (recorderToken) console.log("[Recorder] Session token loaded.");
-      }
-    } catch {
-      // Manually-loaded extension without a recorder session - server posts
-      // will be rejected, which is fine outside a recorder-managed session.
-      console.warn("[Recorder] No session token file found; server sync disabled.");
-    }
-  })();
 
   // Helper function to send data to the Python server
   async function sendEventToServer(eventData: HttpEvent) {

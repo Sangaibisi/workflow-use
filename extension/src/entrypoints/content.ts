@@ -758,6 +758,12 @@ function extractSiblingContext(
 // --- Custom Click Handler ---
 function handleCustomClick(event: MouseEvent) {
   if (!isRecordingActive) return;
+  // Synthetic events re-dispatched by page scripts (widget libraries proxying
+  // to hidden controls, form components re-firing keys) are not user actions:
+  // recording them duplicated real steps and invented phantom ones. The
+  // user's actual gesture on the visible element is always trusted and is
+  // what gets recorded.
+  if (!event.isTrusted) return;
   // Nearest interactive ancestor (composedPath-aware): clicking the <span>
   // inside a button records the BUTTON, not the span.
   const targetElement = resolveInteractiveTarget(event);
@@ -932,6 +938,9 @@ function isElementVisible(element: HTMLElement): boolean {
 // --- Custom Input Handler ---
 function handleInput(event: Event) {
   if (!isRecordingActive) return;
+  // JS-dispatched input events (frameworks announcing programmatic value
+  // sets) would record phantom InputSteps; see handleCustomClick.
+  if (!event.isTrusted) return;
   const targetElement = event.target as HTMLInputElement | HTMLTextAreaElement;
   if (!targetElement) return;
   // Rich-text editors (contenteditable) have no `value` property, so the
@@ -1042,6 +1051,9 @@ function recordContentEditableInput(host: HTMLElement) {
 // --- Custom Select Change Handler ---
 function handleSelectChange(event: Event) {
   if (!isRecordingActive) return;
+  // Synthetic change events from page scripts are not user actions; see
+  // handleCustomClick.
+  if (!event.isTrusted) return;
   const targetElement = event.target as HTMLSelectElement;
   // Ensure it's a select element
   if (!targetElement || targetElement.tagName !== "SELECT") return;
@@ -1100,6 +1112,10 @@ const CAPTURED_KEYS = new Set(["Enter", "Tab", "Escape", "PageUp", "PageDown"]);
 
 function handleKeydown(event: KeyboardEvent) {
   if (!isRecordingActive) return;
+  // Form widgets commonly RE-DISPATCH Enter as a synthetic keydown (observed
+  // live: Wikipedia's search recorded one user Enter as two key_press steps).
+  // Only the user's trusted keystroke belongs in the recording.
+  if (!event.isTrusted) return;
 
   const key = event.key;
   let keyToLog = "";

@@ -2,7 +2,11 @@ import asyncio
 import json
 import os
 import pathlib
+import re
 import secrets
+import signal
+import subprocess
+import time
 from typing import Optional
 
 import uvicorn
@@ -73,6 +77,38 @@ def _find_extension_capable_browser() -> str | None:
 	return None
 
 
+def _terminate_stale_recorder_browsers() -> None:
+	"""Kill leftover recorder-launched browsers from previous sessions.
+
+	Observed live: a recorder browser that outlived its backend kept recording
+	(persisted state + keepalive alarm), its service worker re-read the freshly
+	ROTATED token file on wake-up, and yesterday's events were accepted into a
+	brand-new recording. The leftover also holds the persistent user_data_dir
+	lock, silently forcing the new launch onto a temp profile.
+
+	Matches ONLY processes whose command line loads OUR extension directory,
+	i.e. browsers this service launched. Best-effort: no pgrep (Windows) means
+	no cleanup, which is how it behaved before.
+	"""
+	pattern = re.escape(f'--load-extension={EXT_DIR.resolve()}')
+	try:
+		out = subprocess.run(['pgrep', '-f', pattern], capture_output=True, text=True)
+	except FileNotFoundError:
+		return
+	pids = [int(p) for p in out.stdout.split() if p.strip().isdigit()]
+	if not pids:
+		return
+	print(f'[Service] Terminating {len(pids)} stale recorder browser process(es) from a previous session...')
+	for sig in (signal.SIGTERM, signal.SIGKILL):
+		for pid in pids:
+			try:
+				os.kill(pid, sig)
+			except ProcessLookupError:
+				pass
+		if sig == signal.SIGTERM:
+			time.sleep(1.0)  # let the profile lock be released gracefully
+
+
 class RecordingService:
 	def __init__(self):
 		self.event_queue: asyncio.Queue[RecorderEvent] = asyncio.Queue()
@@ -89,6 +125,11 @@ class RecordingService:
 		# Origin checks this closes the open localhost surface where any web page
 		# or LAN process could inject fake steps into a recording.
 		self.session_token = secrets.token_urlsafe(24)
+
+		# Wall-clock start of the current capture session; steps recorded before
+		# it belong to some earlier session (stale browser instance) and are
+		# dropped on receipt. Set in capture_workflow().
+		self.session_started_ms = 0
 
 		self.app = FastAPI(title='Temporary Recording Event Server')
 
@@ -126,8 +167,34 @@ class RecordingService:
 		self.browser_task: Optional[asyncio.Task] = None
 		self.event_processor_task: Optional[asyncio.Task] = None
 
+	def _drop_pre_session_steps(self, event: HttpWorkflowUpdateEvent) -> HttpWorkflowUpdateEvent:
+		"""Drop workflow steps recorded before this capture session started.
+
+		The extension broadcasts the WHOLE accumulated workflow; a stale
+		browser instance from a previous session can therefore deliver
+		yesterday's browsing into today's recording (observed live). Step
+		timestamps come from Date.now() on the same machine, so a small skew
+		margin is plenty.
+		"""
+		if not self.session_started_ms:
+			return event
+		cutoff = self.session_started_ms - 5_000
+		kept = []
+		dropped = 0
+		for step in event.payload.steps:
+			ts = getattr(step, 'timestamp', None)
+			if isinstance(ts, (int, float)) and ts < cutoff:
+				dropped += 1
+				continue
+			kept.append(step)
+		if dropped:
+			print(f'[Service] Dropped {dropped} step(s) recorded before this session started (stale recorder instance?).')
+			event.payload.steps = kept
+		return event
+
 	async def _handle_event_post(self, event_data: RecorderEvent):
 		if isinstance(event_data, HttpWorkflowUpdateEvent):
+			event_data = self._drop_pre_session_steps(event_data)
 			self.last_workflow_update_event = event_data
 		await self.event_queue.put(event_data)
 		return {'status': 'accepted', 'message': 'Event queued for processing'}
@@ -184,6 +251,11 @@ class RecordingService:
 			print(f'[Service] ERROR: Extension directory not found: {EXT_DIR}')
 			self.recording_complete_event.set()  # Signal failure
 			return
+
+		# A leftover browser from a previous session must go BEFORE the new
+		# token lands on disk - its service worker re-reads the token file on
+		# wake-up and would authenticate its stale events into this session.
+		await asyncio.to_thread(_terminate_stale_recorder_browsers)
 
 		# Hand the per-session token to the extension by packaging it next to the
 		# unpacked extension; the service worker reads it via chrome.runtime.getURL.
@@ -258,6 +330,7 @@ class RecordingService:
 		self.final_workflow_output = None
 		self.recording_complete_event.clear()
 		self.final_workflow_processed_flag = False
+		self.session_started_ms = int(time.time() * 1000)
 
 		# Start background tasks
 		self.event_processor_task = asyncio.create_task(self._process_event_queue())

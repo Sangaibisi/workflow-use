@@ -8,6 +8,7 @@ heuristics, and optional LLM assistance to create deterministic, reusable workfl
 
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -383,6 +384,13 @@ class VariableIdentifier:
 		"""Normalize a string to a valid variable name."""
 		# Convert to lowercase
 		name = name.lower()
+
+		# Transliterate to ASCII instead of eating non-ASCII letters:
+		# 'Vikipedi üzerinde ara' used to become 'vikipedi_zerinde_ara'.
+		# NFKD strips diacritics (ü->u, ş->s, ç->c...); dotless ı has no
+		# decomposition and maps by hand.
+		name = name.replace('ı', 'i')
+		name = unicodedata.normalize('NFKD', name).encode('ascii', 'ignore').decode('ascii')
 
 		# Remove common prefixes/suffixes
 		for prefix in ['input-', 'field-', 'txt-', 'input_', 'field_']:
